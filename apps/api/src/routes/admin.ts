@@ -8,13 +8,15 @@ import {
   createPlatformLinkSchema,
   createSourceSchema,
   createTimelineEntrySchema,
+  eventListQuerySchema,
   updateEventSchema
 } from "@memory-archive/shared";
-import { prisma } from "@memory-archive/db";
+import { prisma, type Prisma } from "@memory-archive/db";
 import { getAdminSession } from "../lib/auth.js";
 import { runPublishPreflight } from "../lib/preflight.js";
 import { getIdParam, getTaskIdParam } from "../lib/route-params.js";
 import { enqueueCaptureTask } from "../lib/task-queue.js";
+import { serializeEventSummary } from "../lib/serializers.js";
 
 function adminUserId(request: FastifyRequest) {
   const session = getAdminSession(request);
@@ -84,6 +86,85 @@ function sourceTypeFromContentKind(contentKind: string) {
 }
 
 export async function registerAdminRoutes(app: FastifyInstance) {
+  app.get("/admin/events", { schema: { tags: ["admin"] } }, async (request) => {
+    const query = eventListQuerySchema.parse(request.query);
+    const where: Prisma.EventWhereInput = {};
+
+    if (query.editorialStatus) where.editorialStatus = query.editorialStatus;
+    if (query.query) {
+      where.OR = [
+        { title: { contains: query.query, mode: "insensitive" } },
+        { neutralTitle: { contains: query.query, mode: "insensitive" } },
+        { summary: { contains: query.query, mode: "insensitive" } }
+      ];
+    }
+    if (query.topic) where.topic = { slug: query.topic };
+    if (query.tag) where.tags = { some: { tag: { slug: query.tag } } };
+    if (query.eventProcessStatus) where.eventProcessStatus = query.eventProcessStatus;
+    if (query.platform) {
+      where.sources = { some: { platformLinks: { some: { platform: query.platform } } } };
+    }
+    if (query.dateFrom || query.dateTo) {
+      where.occurredAt = {
+        ...(query.dateFrom ? { gte: query.dateFrom } : {}),
+        ...(query.dateTo ? { lte: query.dateTo } : {})
+      };
+    }
+
+    const orderBy: Prisma.EventOrderByWithRelationInput | Prisma.EventOrderByWithRelationInput[] =
+      query.sort === "oldest"
+        ? { occurredAt: "asc" as const }
+        : query.sort === "newest"
+          ? { occurredAt: "desc" as const }
+          : query.sort === "sourceCount"
+            ? [{ sources: { _count: "desc" as const } }, { updatedAt: "desc" as const }]
+            : { updatedAt: "desc" as const };
+
+    const [events, total] = await Promise.all([
+      prisma.event.findMany({
+        where,
+        orderBy,
+        skip: (query.page - 1) * query.pageSize,
+        take: query.pageSize,
+        include: {
+          topic: true,
+          tags: { include: { tag: true } },
+          sources: {
+            include: {
+              platformLinks: { orderBy: [{ displayOrder: "asc" }, { publishedAt: "asc" }] },
+              captures: {
+                where: { captureStatus: "SUCCEEDED" },
+                orderBy: [{ capturedAt: "desc" }, { createdAt: "desc" }]
+              }
+            }
+          },
+          _count: {
+            select: {
+              sources: true,
+              timelineEntries: true
+            }
+          }
+        }
+      }),
+      prisma.event.count({ where })
+    ]);
+
+    const platformCounts = await Promise.all(
+      events.map((event) =>
+        prisma.sourcePlatformLink.count({
+          where: { source: { eventId: event.id } }
+        })
+      )
+    );
+
+    return {
+      items: events.map((event, index) => serializeEventSummary(event, platformCounts[index] ?? 0)),
+      page: query.page,
+      pageSize: query.pageSize,
+      total
+    };
+  });
+
   app.post("/admin/events", { schema: { tags: ["admin"] } }, async (request, reply) => {
     const body = createEventSchema.parse(request.body);
     const event = await prisma.event.create({ data: body as any });
@@ -402,5 +483,138 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       }
     });
     return report;
+  });
+
+  app.get("/admin/submissions", { schema: { tags: ["admin"] } }, async () => {
+    return prisma.submission.findMany({
+      orderBy: [{ status: "asc" }, { createdAt: "desc" }],
+      include: {
+        event: {
+          select: {
+            id: true,
+            neutralTitle: true,
+            slug: true
+          }
+        }
+      }
+    });
+  });
+
+  app.post("/admin/submissions/:id/resolve", { schema: { tags: ["admin"] } }, async (request, reply) => {
+    const id = getIdParam(request);
+    const body = z
+      .object({
+        status: z.enum(["REVIEWED", "ACCEPTED", "REJECTED"])
+      })
+      .parse(request.body);
+
+    const submission = await prisma.submission.update({
+      where: { id },
+      data: { status: body.status },
+      include: {
+        event: {
+          select: {
+            id: true,
+            neutralTitle: true,
+            slug: true
+          }
+        }
+      }
+    });
+
+    await prisma.auditLog.create({
+      data: {
+        userId: adminUserId(request),
+        entityType: "Submission",
+        entityId: id,
+        action: "UPDATED",
+        metadata: body
+      }
+    });
+
+    return submission;
+  });
+
+  app.get("/admin/corrections", { schema: { tags: ["admin"] } }, async () => {
+    return prisma.correction.findMany({
+      orderBy: [{ status: "asc" }, { createdAt: "desc" }],
+      include: {
+        event: {
+          select: {
+            id: true,
+            neutralTitle: true,
+            slug: true
+          }
+        },
+        source: {
+          select: {
+            id: true,
+            title: true
+          }
+        }
+      }
+    });
+  });
+
+  app.post("/admin/corrections/:id/resolve", { schema: { tags: ["admin"] } }, async (request, reply) => {
+    const id = getIdParam(request);
+    const body = z
+      .object({
+        status: z.enum(["ACCEPTED", "REJECTED", "RESOLVED"])
+      })
+      .parse(request.body);
+
+    const beforeCorrection = await prisma.correction.findUnique({
+      where: { id },
+      include: {
+        source: true
+      }
+    });
+    if (!beforeCorrection) return reply.code(404).send({ error: "CORRECTION_NOT_FOUND" });
+
+    const eventId = beforeCorrection.eventId ?? beforeCorrection.source?.eventId;
+    const beforeEvent = eventId ? await loadEventSnapshot(eventId) : null;
+    const correction = await prisma.correction.update({
+      where: { id },
+      data: { status: body.status },
+      include: {
+        event: {
+          select: {
+            id: true,
+            neutralTitle: true,
+            slug: true
+          }
+        },
+        source: {
+          select: {
+            id: true,
+            title: true
+          }
+        }
+      }
+    });
+
+    if (eventId && beforeEvent && (body.status === "ACCEPTED" || body.status === "RESOLVED")) {
+      const afterEvent = await loadEventSnapshot(eventId);
+      await createEventVersion(
+        eventId,
+        beforeEvent,
+        afterEvent,
+        `处理纠错：${beforeCorrection.title}`,
+        adminUserId(request)
+      );
+    }
+
+    await prisma.auditLog.create({
+      data: {
+        userId: adminUserId(request),
+        entityType: "Correction",
+        entityId: id,
+        action: "UPDATED",
+        metadata: body
+      }
+    });
+
+    return correction;
   });
 }

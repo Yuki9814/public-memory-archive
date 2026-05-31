@@ -31,7 +31,9 @@ import type {
   ClaimDto,
   EventDetailDto,
   EventListItemDto,
+  FailedCheck,
   PlatformLinkDto,
+  ReportType,
   RevisionDto,
   SourceDto,
   TimelineEntryDto,
@@ -40,15 +42,37 @@ import type {
 import { getEventProcessStatusLabel, getReliabilityLabel } from "@memory-archive/shared";
 import {
   fetchClaims,
+  fetchAdminCorrections,
+  fetchAdminEvents,
+  fetchAdminReports,
+  fetchAdminSubmissions,
+  fetchAdminTask,
   fetchEventDetail,
+  fetchEventPage,
   fetchEvents,
   fetchPlatformLinks,
   fetchSession,
   fetchSources,
   fetchTimeline,
   fetchVersions,
+  captureSource,
+  createCorrection,
+  createReport,
+  createSubmission,
+  failedChecksFromError,
+  isDevMockFallbackEnabled,
   loginAdmin,
-  logoutAdmin
+  logoutAdmin,
+  publishAdminEvent,
+  resolveAdminCorrection,
+  resolveAdminReport,
+  resolveAdminSubmission,
+  type AdminCorrectionDto,
+  type AdminEventDto,
+  type AdminReportDto,
+  type AdminSubmissionDto,
+  type AdminTaskDto,
+  type SubmitReceipt
 } from "./api.js";
 import { formatDate, getTimeSafe } from "./format-date.js";
 import { mockCandidates } from "./mock.js";
@@ -170,6 +194,67 @@ function claimImportanceLabel(value: string) {
   return labels[value] ?? value;
 }
 
+function editorialStatusLabel(value: string) {
+  const labels: Record<string, string> = {
+    DRAFT: "草稿",
+    PENDING_REVIEW: "待复核",
+    PUBLISHED: "已发布",
+    UNPUBLISHED: "已下架",
+    ARCHIVED: "已归档"
+  };
+  return labels[value] ?? value;
+}
+
+function reportTypeLabel(value: string) {
+  const labels: Record<string, string> = {
+    PRIVACY_LEAK: "隐私泄露",
+    DOXXING: "人肉曝光",
+    DEFAMATION_RISK: "诽谤风险",
+    MINOR_INFO: "未成年人信息",
+    HARASSMENT: "骚扰风险",
+    COPYRIGHT: "版权问题",
+    OTHER: "其他"
+  };
+  return labels[value] ?? value;
+}
+
+function queueStatusLabel(value: string) {
+  const labels: Record<string, string> = {
+    PENDING: "待处理",
+    REVIEWED: "已复核",
+    ACCEPTED: "已采纳",
+    REJECTED: "已驳回",
+    TRIAGED: "已分诊",
+    RESOLVED: "已处理",
+    OPEN: "待审核",
+    ACTIVE: "处理中",
+    COMPLETED: "已完成",
+    FAILED: "失败",
+    QUEUED: "排队中"
+  };
+  return labels[value] ?? value;
+}
+
+function preflightLabel(check: FailedCheck) {
+  const labels: Record<string, { title: string; action: string; severity: "high" | "medium" }> = {
+    NEUTRAL_TITLE_REQUIRED: { title: "缺少中性标题", action: "补齐事件核心信息中的 neutralTitle。", severity: "high" },
+    INCITING_TITLE: { title: "标题含动员性措辞", action: "改成事实性、非号召式标题。", severity: "high" },
+    SUMMARY_REQUIRED: { title: "缺少摘要", action: "补齐中立摘要，避免结论先行。", severity: "high" },
+    SOURCE_REQUIRED: { title: "缺少来源", action: "至少添加一条可复核来源。", severity: "high" },
+    TIMELINE_SOURCE_REQUIRED: { title: "时间线未绑定来源", action: "至少为一条时间线节点绑定 sourceId。", severity: "medium" },
+    SOURCE_RELIABILITY_REQUIRED: { title: "来源未定级", action: "为来源选择 A/B/C/D 证据等级。", severity: "medium" },
+    PLATFORM_LINK_DESCRIPTION_REQUIRED: { title: "平台外链缺少说明", action: "补充 80-160 字中性说明。", severity: "medium" },
+    KEY_CLAIM_EVIDENCE_REQUIRED: { title: "关键主张缺少证据", action: "关联证据，或标为未核实/证据不足。", severity: "high" },
+    HIGH_PRIVACY_NOTE_REQUIRED: { title: "高隐私对象缺少说明", action: "补充 privacyNote。", severity: "high" },
+    MINOR_HIGH_PRIVACY_REQUIRED: { title: "未成年人保护等级不足", action: "调整为 HIGH 或 MINOR_PROTECTED。", severity: "high" },
+    SENSITIVE_PERSONAL_INFO: { title: "疑似敏感个人信息", action: "删除或化名处理后再发布。", severity: "high" },
+    VERSION_SNAPSHOT_REQUIRED: { title: "缺少版本快照", action: "保存事件版本后再发布。", severity: "medium" },
+    CORRECTION_ENTRY_REQUIRED: { title: "纠错入口未开启", action: "开启 correctionEnabled。", severity: "medium" },
+    REPORT_ENTRY_REQUIRED: { title: "举报入口未开启", action: "开启 reportEnabled。", severity: "medium" }
+  };
+  return labels[check.code] ?? { title: check.code, action: "按路径提示修复对应字段。", severity: "medium" as const };
+}
+
 // Components
 function Header({
   theme,
@@ -195,7 +280,7 @@ function Header({
     <header className="site-header">
       <button className="brand" onClick={() => navigate("/")} aria-label="返回首页">
         <LibraryBig size={22} className="brand-icon" />
-        <span>圈内风波簿</span>
+        <span>公共事件长记忆档案馆</span>
       </button>
       <nav>
         {links.map(([href, label]) => {
@@ -259,6 +344,26 @@ function EmptyState({ title, body }: { title: string; body: string }) {
       <Archive />
       <p>{title}</p>
       <span>{body}</span>
+    </div>
+  );
+}
+
+function ErrorState({ title, body, onRetry }: { title: string; body: string; onRetry?: () => void }) {
+  return (
+    <div className="state-panel error-panel animate-fade">
+      <AlertTriangle />
+      <p>{title}</p>
+      <span>{body}</span>
+      {onRetry && <button onClick={onRetry}>重试</button>}
+    </div>
+  );
+}
+
+function DevFallbackNotice() {
+  if (!isDevMockFallbackEnabled()) return null;
+  return (
+    <div className="dev-fallback-notice">
+      开发模式：接口不可用时会回退到演示数据，生产环境会显示错误态。
     </div>
   );
 }
@@ -387,6 +492,57 @@ function CurrentStatus({ event }: { event: EventDetailDto }) {
           ))}
         </div>
       )}
+    </section>
+  );
+}
+
+function CredibilitySummary({
+  event,
+  claims,
+  sources,
+  links,
+  versions
+}: {
+  event: EventDetailDto;
+  claims: ClaimDto[];
+  sources: SourceDto[];
+  links: PlatformLinkDto[];
+  versions: RevisionDto[];
+}) {
+  const strongEvidenceCount = claims.flatMap((claim) => claim.evidenceLinks).filter((link) => link.evidence.reliabilityLevel === "A_STRONG").length;
+  const weakSourceCount = sources.filter((source) => source.reliabilityLevel === "D_WEAK" || source.reliabilityLevel === "UNKNOWN").length;
+  const openClaimCount = claims.filter((claim) => claim.status === "UNVERIFIED" || claim.status === "INSUFFICIENT_EVIDENCE" || claim.status === "DISPUTED").length;
+  const archivedLinkCount = links.filter((link) => !!link.archiveUrl || !!link.capturedAt).length;
+  const latestVersion = versions[0];
+
+  return (
+    <section className="module credibility-module animate-fade" id="credibility-summary">
+      <div className="module-title">
+        <Shield size={20} />
+        <h2>可信度摘要</h2>
+      </div>
+      <div className="credibility-grid">
+        <div>
+          <span>强证据链</span>
+          <strong>{strongEvidenceCount}</strong>
+        </div>
+        <div>
+          <span>弱线索/未定级来源</span>
+          <strong>{weakSourceCount}</strong>
+        </div>
+        <div>
+          <span>未决主张</span>
+          <strong>{openClaimCount}</strong>
+        </div>
+        <div>
+          <span>已存档外链</span>
+          <strong>{archivedLinkCount}/{links.length}</strong>
+        </div>
+      </div>
+      <p className="credibility-note">
+        当前阶段：{processStatusLabel(event.eventProcessStatus)}。最近版本：
+        {latestVersion ? `v${latestVersion.versionNumber}，${formatDate(latestVersion.createdAt)}` : "暂无修订记录"}。
+      </p>
     </section>
   );
 }
@@ -717,8 +873,9 @@ function RevisionHistory({ versions }: { versions: RevisionDto[] }) {
 }
 
 // 13 & 14. CTASection
-function CTASection({ type }: { type: "correction" | "report" }) {
+function CTASection({ type, eventId }: { type: "correction" | "report"; eventId?: string }) {
   const isCorrection = type === "correction";
+  const path = `${isCorrection ? "/corrections" : "/reports"}${eventId ? `?eventId=${encodeURIComponent(eventId)}` : ""}`;
   return (
     <article className={`module cta-module ${isCorrection ? "correction" : "report"}`} id={isCorrection ? "correction-cta" : "report-cta"}>
       <div className="module-title">
@@ -730,7 +887,7 @@ function CTASection({ type }: { type: "correction" | "report" }) {
           ? "我们秉持中立客观的态度。若您发现本档案中存在事实性硬伤、失效的来源链接，或不准确的陈述，欢迎提交详实的佐证资料，协助编辑部进行滚动修订。"
           : "若您发现本档案中包含可能泄露个人隐私（如身份证号、手机、住址等）、人肉爆料、诽谤言论或涉及未成年人等高敏感违法内容，请立即通过紧急通道进行申诉。"}
       </p>
-      <button onClick={() => navigate(isCorrection ? "/corrections" : "/reports")}>
+      <button onClick={() => navigate(path)}>
         {isCorrection ? "提交事实纠错说明" : "发起紧急删除/撤稿举报"}
       </button>
     </article>
@@ -746,9 +903,11 @@ function EventDetailPage({ slug }: { slug: string }) {
   const [sources, setSources] = useState<SourceDto[]>([]);
   const [versions, setVersions] = useState<RevisionDto[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
 
   useEffect(() => {
     setLoading(true);
+    setError("");
     Promise.all([
       fetchEventDetail(slug),
       fetchPlatformLinks(slug),
@@ -767,11 +926,13 @@ function EventDetailPage({ slug }: { slug: string }) {
       })
       .catch((err) => {
         console.error("加载卷宗失败", err);
+        setError("卷宗接口暂时不可用，生产环境不会回退到演示数据。");
       })
       .finally(() => setLoading(false));
   }, [slug]);
 
   if (loading) return <main className="detail-shell"><LoadingState /></main>;
+  if (error) return <main className="detail-shell"><ErrorState title="卷宗加载失败" body={error} onRetry={() => window.location.reload()} /></main>;
   if (!event) return <main className="detail-shell"><EmptyState title="未找到相关档案" body="该卷宗可能尚未建立，或已根据隐私规则被紧急归档撤销。" /></main>;
 
   return (
@@ -781,6 +942,8 @@ function EventDetailPage({ slug }: { slug: string }) {
       
       <div className="detail-layout">
         <div className="detail-main">
+          <CredibilitySummary event={event} claims={claims} sources={sources} links={links} versions={versions} />
+
           {/* 2. NeutralSummary */}
           <NeutralSummary event={event} />
           
@@ -834,26 +997,27 @@ function EventDetailPage({ slug }: { slug: string }) {
           
           <div className="cta-row">
             {/* 13. CorrectionCTA */}
-            <CTASection type="correction" />
+            <CTASection type="correction" eventId={event.id} />
             {/* 14. ReportCTA */}
-            <CTASection type="report" />
+            <CTASection type="report" eventId={event.id} />
           </div>
         </div>
         
         {/* Table of Contents sidebar */}
         <aside className="detail-toc">
           <span>卷宗目录结构</span>
-          <a href="#neutral-summary">一、 中性摘要</a>
-          <a href="#current-status">二、 现实进展</a>
-          <a href="#original-source-links">三、 原始资料跳转</a>
-          <a href="#timeline">四、 事件时间线</a>
-          <a href="#claim-matrix">五、 主张分歧矩阵</a>
-          <a href="#evidence-cabinet">六、 核心证据柜</a>
-          <a href="#source-list">七、 资料源列表</a>
-          <a href="#what-we-know">八、 已知事实清单</a>
-          <a href="#what-is-disputed">九、 尚存争议细节</a>
-          <a href="#what-not-to-infer">十、 不应推断界限</a>
-          <a href="#revision-history">十一、 档案修订日志</a>
+          <a href="#credibility-summary">一、 可信度摘要</a>
+          <a href="#neutral-summary">二、 中性摘要</a>
+          <a href="#current-status">三、 现实进展</a>
+          <a href="#original-source-links">四、 原始资料跳转</a>
+          <a href="#timeline">五、 事件时间线</a>
+          <a href="#claim-matrix">六、 主张分歧矩阵</a>
+          <a href="#evidence-cabinet">七、 核心证据柜</a>
+          <a href="#source-list">八、 资料源列表</a>
+          <a href="#what-we-know">九、 已知事实清单</a>
+          <a href="#what-is-disputed">十、 尚存争议细节</a>
+          <a href="#what-not-to-infer">十一、 不应推断界限</a>
+          <a href="#revision-history">十二、 档案修订日志</a>
           
           <button onClick={() => navigate("/events")}>
             返回事件索引
@@ -894,52 +1058,92 @@ function SimplePage({
 }
 
 // Interactive Forms
-function FormStub({ kind }: { kind: "submit" | "correction" | "report" }) {
+function PublicFeedbackForm({ kind }: { kind: "submit" | "correction" | "report" }) {
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [url, setUrl] = useState("");
-  const [reportType, setReportType] = useState("PRIVACY_LEAK");
+  const [email, setEmail] = useState("");
+  const [reportType, setReportType] = useState<ReportType>("PRIVACY_LEAK");
   const [submitting, setSubmitting] = useState(false);
-  const [success, setSuccess] = useState(false);
-  const [hash, setHash] = useState("");
+  const [receipt, setReceipt] = useState<SubmitReceipt | null>(null);
+  const [error, setError] = useState("");
 
   const copy = {
-    submit: ["提交线索", "例如：某平台当事人发帖材料、公告页面链接", "线索成功受理"],
-    correction: ["提交纠错说明", "例如：事实争议描述修正、某失效链接补充", "纠错请求已递交审核"],
-    report: ["提交紧急申诉举报", "例如：涉及未成年隐私泄露、当事人人肉风险等", "紧急审查程序启动"]
+    submit: ["提交线索", "例如：某平台公开材料、公告页面链接", "线索已受理"],
+    correction: ["提交纠错说明", "例如：事实争议描述修正、某失效链接补充", "纠错请求已进入复核"],
+    report: ["提交安全举报", "例如：涉及未成年人信息、隐私泄露、人肉风险等", "安全举报已进入复核"]
   }[kind];
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!title || !description) {
       alert("请填写关键的标题与说明信息！");
       return;
     }
-    
+
+    const params = new URLSearchParams(window.location.search);
+    const eventId = params.get("eventId") || undefined;
+    const sourceId = params.get("sourceId") || undefined;
+    const platformLinkId = params.get("platformLinkId") || undefined;
+    const cleanEmail = email.trim() || undefined;
+    const cleanUrl = url.trim() || undefined;
+
     setSubmitting(true);
-    // Simulate API request delay
-    setTimeout(() => {
+    setError("");
+    try {
+      const urlNote = cleanUrl ? `\n\n补充材料链接：${cleanUrl}` : "";
+      const result =
+        kind === "submit"
+          ? await createSubmission({
+              eventId,
+              email: cleanEmail,
+              title,
+              body: description,
+              sourceUrl: cleanUrl
+            })
+          : kind === "correction"
+            ? await createCorrection({
+                eventId,
+                sourceId,
+                email: cleanEmail,
+                title,
+                body: `${description}${urlNote}`
+              })
+            : await createReport({
+                eventId,
+                sourceId,
+                platformLinkId,
+                reportType,
+                reporterEmail: cleanEmail,
+                body: `${description}${urlNote}`
+              });
+      setReceipt(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "提交失败，请稍后重试。");
+    } finally {
       setSubmitting(false);
-      setSuccess(true);
-      setHash("TX_" + Math.random().toString(36).substring(2, 10).toUpperCase() + "_" + Date.now().toString().slice(-4));
-    }, 1200);
+    }
   };
 
-  if (success) {
+  if (receipt) {
     return (
       <div className="form-success-card">
         <CheckCircle2 size={48} />
         <h2>{copy[2]}</h2>
-        <p>档案馆已收到您的反馈，将严格按照《公共事件记录中立审核指引》进行归档与隐私保护预检。</p>
+        <p>档案馆已收到反馈，将按照公共事件记录规则进行来源核验、隐私保护预检和人工复核。</p>
         
         <div className="receipt-box">
           <div>
-            <span>卷宗交易流水：</span>
-            <strong>{hash}</strong>
+            <span>后端回执 ID：</span>
+            <strong>{receipt.id}</strong>
           </div>
           <div>
             <span>反馈类型：</span>
             <strong>{kind.toUpperCase()}</strong>
+          </div>
+          <div>
+            <span>当前状态：</span>
+            <strong>{queueStatusLabel(receipt.status)}</strong>
           </div>
           <div>
             <span>接收时间：</span>
@@ -952,10 +1156,12 @@ function FormStub({ kind }: { kind: "submit" | "correction" | "report" }) {
         </div>
 
         <button onClick={() => {
-          setSuccess(false);
+          setReceipt(null);
           setTitle("");
           setDescription("");
           setUrl("");
+          setEmail("");
+          setError("");
         }}>
           继续提交
         </button>
@@ -974,11 +1180,21 @@ function FormStub({ kind }: { kind: "submit" | "correction" | "report" }) {
           placeholder={`请输入简要的${copy[0]}标题`}
         />
       </label>
+
+      <label>
+        联系邮箱 (可选)
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="用于后续补充材料，不会公开展示"
+        />
+      </label>
       
       {kind === "report" && (
         <label>
           举报侵权类型
-          <select value={reportType} onChange={(e) => setReportType(e.target.value)}>
+          <select value={reportType} onChange={(e) => setReportType(e.target.value as ReportType)}>
             <option value="PRIVACY_LEAK">隐私泄露 (PRIVACY_LEAK)</option>
             <option value="DOXXING">人肉曝光 (DOXXING)</option>
             <option value="DEFAMATION_RISK">诽谤风险 (DEFAMATION_RISK)</option>
@@ -1010,60 +1226,152 @@ function FormStub({ kind }: { kind: "submit" | "correction" | "report" }) {
         />
       </label>
 
+      {error && <div className="form-error-box">{error}</div>}
+
       <button type="submit" disabled={submitting}>
-        {submitting ? "材料封缄上传中..." : `递交 ${copy[0]}`}
+        {submitting ? "材料提交中..." : `递交 ${copy[0]}`}
       </button>
     </form>
   );
 }
 
-// Interactive Admin Page
-interface ReviewTask {
-  id: string;
-  type: "CLUE" | "CORRECTION" | "REPORT";
-  title: string;
-  description: string;
-  status: "PENDING" | "APPROVED" | "REJECTED";
-}
-
 function AdminPage({ section }: { section: string }) {
   const titles: Record<string, string> = {
-    events: "后台事件编辑器",
-    sources: "后台来源管理",
+    events: "事件发布预检",
+    sources: "来源抓取任务",
     "platform-links": "后台平台外链管理",
-    review: "后台审核队列",
+    review: "线索与纠错队列",
     reports: "后台举报队列"
   };
+  const [adminEvents, setAdminEvents] = useState<AdminEventDto[]>([]);
+  const [reports, setReports] = useState<AdminReportDto[]>([]);
+  const [submissions, setSubmissions] = useState<AdminSubmissionDto[]>([]);
+  const [corrections, setCorrections] = useState<AdminCorrectionDto[]>([]);
+  const [adminLoading, setAdminLoading] = useState(false);
+  const [adminError, setAdminError] = useState("");
+  const [adminMessage, setAdminMessage] = useState("");
+  const [publishingId, setPublishingId] = useState("");
+  const [failedChecks, setFailedChecks] = useState<Record<string, FailedCheck[]>>({});
+  const [reportNotes, setReportNotes] = useState<Record<string, string>>({});
+  const [sourceIdInput, setSourceIdInput] = useState("");
+  const [captureResult, setCaptureResult] = useState<{ taskId: string; queued: boolean } | null>(null);
+  const [taskLookupId, setTaskLookupId] = useState("");
+  const [taskDetail, setTaskDetail] = useState<AdminTaskDto | null>(null);
 
-  // Mock Admin State to show real interactions
-  const [reviewTasks, setReviewTasks] = useState<ReviewTask[]>([
-    {
-      id: "rt_1",
-      type: "CLUE",
-      title: "补充婚恋纠纷的警方二次通报链接",
-      description: "提供了最新官方警情通报的PDF跳转地址，需要核实真伪。",
-      status: "PENDING"
-    },
-    {
-      id: "rt_2",
-      type: "CORRECTION",
-      title: "修正校园举报中‘发生时间’为4月7日夜里",
-      description: "用户提供该学校宿舍电闸断电日志以佐证，确认描述误差。",
-      status: "PENDING"
-    },
-    {
-      id: "rt_3",
-      type: "REPORT",
-      title: "隐私侵权：在Timeline中出现了宿舍门牌号",
-      description: "发现涉事学生门牌号被间接提及，不符合未成年人与隐私保护指引。",
-      status: "PENDING"
+  const loadAdminData = async () => {
+    setAdminLoading(true);
+    setAdminError("");
+    setAdminMessage("");
+    try {
+      if (section === "events") {
+        const data = await fetchAdminEvents({ pageSize: 50 });
+        setAdminEvents(data.items);
+      } else if (section === "reports") {
+        setReports(await fetchAdminReports());
+      } else if (section === "review") {
+        const [submissionData, correctionData] = await Promise.all([
+          fetchAdminSubmissions(),
+          fetchAdminCorrections()
+        ]);
+        setSubmissions(submissionData);
+        setCorrections(correctionData);
+      }
+    } catch (err) {
+      setAdminError(err instanceof Error ? err.message : "后台数据加载失败");
+    } finally {
+      setAdminLoading(false);
     }
-  ]);
+  };
 
-  const handleReviewAction = (id: string, action: "APPROVED" | "REJECTED") => {
-    setReviewTasks((prev) =>
-      prev.map((t) => (t.id === id ? { ...t, status: action } : t))
-    );
+  useEffect(() => {
+    void loadAdminData();
+  }, [section]);
+
+  const handlePublish = async (event: AdminEventDto) => {
+    setPublishingId(event.id);
+    setAdminError("");
+    setAdminMessage("");
+    setFailedChecks((prev) => ({ ...prev, [event.id]: [] }));
+    try {
+      await publishAdminEvent(event.id);
+      setAdminMessage(`「${event.neutralTitle}」已发布。`);
+      await loadAdminData();
+    } catch (err) {
+      const checks = failedChecksFromError(err);
+      if (checks.length > 0) {
+        setFailedChecks((prev) => ({ ...prev, [event.id]: checks }));
+        setAdminError("发布预检未通过，请按下列项目修复。");
+      } else {
+        setAdminError(err instanceof Error ? err.message : "发布失败");
+      }
+    } finally {
+      setPublishingId("");
+    }
+  };
+
+  const handleReportAction = async (report: AdminReportDto, status: "TRIAGED" | "RESOLVED" | "REJECTED") => {
+    const note = reportNotes[report.id]?.trim() || (status === "TRIAGED" ? "已完成初步分诊。" : status === "RESOLVED" ? "已处理完成。" : "经复核暂不采纳。");
+    setAdminError("");
+    try {
+      await resolveAdminReport(report.id, status, note);
+      setAdminMessage(`举报 ${report.id} 已更新为 ${queueStatusLabel(status)}。`);
+      await loadAdminData();
+    } catch (err) {
+      setAdminError(err instanceof Error ? err.message : "举报处理失败");
+    }
+  };
+
+  const handleSubmissionAction = async (item: AdminSubmissionDto, status: "REVIEWED" | "ACCEPTED" | "REJECTED") => {
+    setAdminError("");
+    try {
+      await resolveAdminSubmission(item.id, status);
+      setAdminMessage(`线索 ${item.id} 已更新为 ${queueStatusLabel(status)}。`);
+      await loadAdminData();
+    } catch (err) {
+      setAdminError(err instanceof Error ? err.message : "线索处理失败");
+    }
+  };
+
+  const handleCorrectionAction = async (item: AdminCorrectionDto, status: "ACCEPTED" | "REJECTED" | "RESOLVED") => {
+    setAdminError("");
+    try {
+      await resolveAdminCorrection(item.id, status);
+      setAdminMessage(`纠错 ${item.id} 已更新为 ${queueStatusLabel(status)}。`);
+      await loadAdminData();
+    } catch (err) {
+      setAdminError(err instanceof Error ? err.message : "纠错处理失败");
+    }
+  };
+
+  const handleCapture = async () => {
+    const sourceId = sourceIdInput.trim();
+    if (!sourceId) {
+      setAdminError("请先填写 sourceId。");
+      return;
+    }
+    setAdminError("");
+    try {
+      const result = await captureSource(sourceId);
+      setCaptureResult(result);
+      setTaskLookupId(result.taskId);
+      setAdminMessage(result.queued ? "抓取任务已进入队列。" : "任务已创建，但 Redis 队列未启用。");
+    } catch (err) {
+      setAdminError(err instanceof Error ? err.message : "抓取任务创建失败");
+    }
+  };
+
+  const handleTaskLookup = async () => {
+    const taskId = taskLookupId.trim();
+    if (!taskId) {
+      setAdminError("请先填写 taskId。");
+      return;
+    }
+    setAdminError("");
+    try {
+      setTaskDetail(await fetchAdminTask(taskId));
+    } catch (err) {
+      setAdminError(err instanceof Error ? err.message : "任务查询失败");
+    }
   };
 
   return (
@@ -1083,70 +1391,174 @@ function AdminPage({ section }: { section: string }) {
       <div className="admin-panel animate-fade">
         <h2>{titles[section] ?? "管理面板"}</h2>
         <p className="admin-subtitle">
-          此处关联 `POST /admin/{section}` 等接口。您可模拟审核、删除外链、预览编辑草稿。
+          后台操作会写入真实接口。AI 辅助仍保持 suggestions-only，不会自动发布或写库。
         </p>
+        {adminError && <div className="admin-alert error"><AlertTriangle size={16} />{adminError}</div>}
+        {adminMessage && <div className="admin-alert success"><CheckCircle2 size={16} />{adminMessage}</div>}
+        {adminLoading && <LoadingState />}
 
-        {section === "review" || section === "reports" ? (
+        {!adminLoading && section === "events" && (
           <div className="admin-list">
-            <h3>待审请求队列 ({reviewTasks.filter((t) => t.status === "PENDING").length})</h3>
-            {reviewTasks.map((task) => {
-              const matchesSection =
-                (section === "review" && (task.type === "CLUE" || task.type === "CORRECTION")) ||
-                (section === "reports" && task.type === "REPORT");
-              
-              if (!matchesSection) return null;
-
-              return (
-                <div className="admin-list-item" key={task.id}>
+            <h3>事件发布预检 ({adminEvents.length})</h3>
+            {adminEvents.length === 0 ? (
+              <EmptyState title="暂无事件" body="后台未读取到事件草稿或公开档案。" />
+            ) : (
+              adminEvents.map((event) => (
+                <div className="admin-list-item admin-list-item-column" key={event.id}>
                   <div className="admin-item-info">
                     <span className="admin-item-meta">
-                      TASK_ID: {task.id.toUpperCase()} | 类型: {task.type}
+                      EVENT_ID: {event.id} | {editorialStatusLabel(event.editorialStatus)} | {processStatusLabel(event.eventProcessStatus)}
                     </span>
-                    <strong className="admin-item-title">{task.title}</strong>
-                    <span className="admin-item-desc">{task.description}</span>
+                    <strong className="admin-item-title">{event.neutralTitle}</strong>
+                    <span className="admin-item-desc">{event.summary}</span>
                     <span className="admin-item-meta">
-                      当前状态：
-                      <strong style={{
-                        color: task.status === "PENDING" ? "var(--accent-yellow)" :
-                               task.status === "APPROVED" ? "var(--accent-green)" : "var(--accent-crimson)"
-                      }}>
-                        {task.status}
-                      </strong>
+                      来源 {event.sourceCount} / 时间线 {event.timelineCount} / 平台外链 {event.platformLinkCount}
                     </span>
                   </div>
-                  {task.status === "PENDING" && (
-                    <div className="admin-item-actions">
-                      <button
-                        className="btn-success"
-                        onClick={() => handleReviewAction(task.id, "APPROVED")}
-                      >
-                        <Check size={14} /> 采纳通过
-                      </button>
-                      <button
-                        className="btn-danger"
-                        onClick={() => handleReviewAction(task.id, "REJECTED")}
-                      >
-                        <X size={14} /> 驳回审核
-                      </button>
+                  <div className="admin-item-actions">
+                    <button onClick={() => navigate(`/events/${event.slug}`)}>
+                      <ExternalLink size={14} /> 查看公开页
+                    </button>
+                    <button className="btn-success" onClick={() => handlePublish(event)} disabled={publishingId === event.id}>
+                      <Check size={14} /> {publishingId === event.id ? "预检中" : "运行预检并发布"}
+                    </button>
+                  </div>
+                  {(failedChecks[event.id] ?? []).length > 0 && (
+                    <div className="preflight-list">
+                      {(failedChecks[event.id] ?? []).map((check) => {
+                        const meta = preflightLabel(check);
+                        return (
+                          <div className={`preflight-item severity-${meta.severity}`} key={`${check.code}-${check.path ?? ""}`}>
+                            <strong>{meta.title}</strong>
+                            <span>{check.message}</span>
+                            <small>路径：{check.path ?? "未指定"} | 修复：{meta.action}</small>
+                          </div>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
-              );
-            })}
+              ))
+            )}
           </div>
-        ) : (
-          <div className="admin-table-simulation">
-            <div className="state-panel" style={{ borderStyle: "solid", padding: "3rem" }}>
-              <Sparkles />
-              <p>管理员数据模型挂载完成</p>
-              <span>请等待联调环境。目前所有接口（/admin/events、/admin/sources 等）已完成本地虚拟映射。</span>
-              
-              <div className="admin-item-actions" style={{ marginTop: "1rem" }}>
-                <button onClick={() => alert("正在下载全部已发布 JSON 归档文件包...")}>
-                  <Archive size={14} /> 导出全量静态归档(JSON)
-                </button>
-              </div>
+        )}
+
+        {!adminLoading && section === "sources" && (
+          <div className="admin-tool-stack">
+            <div className="admin-tool-card">
+              <h3>创建来源抓取任务</h3>
+              <label>
+                Source ID
+                <input value={sourceIdInput} onChange={(e) => setSourceIdInput(e.target.value)} placeholder="src_xxxxx" />
+              </label>
+              <button onClick={handleCapture}><Archive size={14} /> 触发抓取</button>
+              {captureResult && (
+                <p className="admin-inline-result">
+                  taskId: <strong>{captureResult.taskId}</strong>，队列状态：{captureResult.queued ? "已入队" : "未入队"}
+                </p>
+              )}
             </div>
+            <div className="admin-tool-card">
+              <h3>查询抓取任务</h3>
+              <label>
+                Task ID
+                <input value={taskLookupId} onChange={(e) => setTaskLookupId(e.target.value)} placeholder="task_xxxxx" />
+              </label>
+              <button onClick={handleTaskLookup}><Search size={14} /> 查询任务</button>
+              {taskDetail && (
+                <div className="task-detail">
+                  <span>{taskDetail.type} / {queueStatusLabel(taskDetail.status)} / {taskDetail.progress}%</span>
+                  {taskDetail.errorMessage && <span>错误：{taskDetail.errorMessage}</span>}
+                  {(taskDetail.captures ?? []).map((capture) => (
+                    <small key={capture.id}>
+                      {capture.captureStatus} | {capture.originalUrl} | hash: {capture.contentHash ?? "未生成"}
+                    </small>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {!adminLoading && section === "review" && (
+          <div className="admin-list">
+            <h3>线索队列 ({submissions.filter((item) => item.status === "PENDING").length})</h3>
+            {submissions.map((item) => (
+              <div className="admin-list-item" key={item.id}>
+                <div className="admin-item-info">
+                  <span className="admin-item-meta">SUBMISSION_ID: {item.id} | {queueStatusLabel(item.status)}</span>
+                  <strong className="admin-item-title">{item.title}</strong>
+                  <span className="admin-item-desc">{item.body}</span>
+                  {item.sourceUrl && <span className="admin-item-meta">来源链接：{item.sourceUrl}</span>}
+                </div>
+                <div className="admin-item-actions">
+                  <button onClick={() => handleSubmissionAction(item, "REVIEWED")}><Check size={14} /> 已复核</button>
+                  <button className="btn-success" onClick={() => handleSubmissionAction(item, "ACCEPTED")}><Check size={14} /> 采纳</button>
+                  <button className="btn-danger" onClick={() => handleSubmissionAction(item, "REJECTED")}><X size={14} /> 驳回</button>
+                </div>
+              </div>
+            ))}
+            <h3>纠错队列 ({corrections.filter((item) => item.status === "PENDING").length})</h3>
+            {corrections.map((item) => (
+              <div className="admin-list-item" key={item.id}>
+                <div className="admin-item-info">
+                  <span className="admin-item-meta">CORRECTION_ID: {item.id} | {queueStatusLabel(item.status)}</span>
+                  <strong className="admin-item-title">{item.title}</strong>
+                  <span className="admin-item-desc">{item.body}</span>
+                  <span className="admin-item-meta">
+                    事件：{item.event?.neutralTitle ?? "未绑定"} | 来源：{item.source?.title ?? "未绑定"}
+                  </span>
+                </div>
+                <div className="admin-item-actions">
+                  <button className="btn-success" onClick={() => handleCorrectionAction(item, "ACCEPTED")}><Check size={14} /> 采纳并快照</button>
+                  <button onClick={() => handleCorrectionAction(item, "RESOLVED")}><Check size={14} /> 标记已处理</button>
+                  <button className="btn-danger" onClick={() => handleCorrectionAction(item, "REJECTED")}><X size={14} /> 驳回</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {!adminLoading && section === "reports" && (
+          <div className="admin-list">
+            <h3>举报队列 ({reports.filter((item) => item.status === "PENDING").length})</h3>
+            {reports.length === 0 ? (
+              <EmptyState title="暂无举报" body="当前没有待处理安全举报。" />
+            ) : (
+              reports.map((report) => (
+                <div className="admin-list-item admin-list-item-column" key={report.id}>
+                  <div className="admin-item-info">
+                    <span className="admin-item-meta">
+                      REPORT_ID: {report.id} | {reportTypeLabel(report.reportType)} | {queueStatusLabel(report.status)} | priority {report.priority}
+                    </span>
+                    <strong className="admin-item-title">{report.event?.neutralTitle ?? report.platformLink?.title ?? report.source?.title ?? "未绑定对象"}</strong>
+                    <span className="admin-item-desc">{report.body}</span>
+                    {report.resolutionNotes && <span className="admin-item-meta">处理记录：{report.resolutionNotes}</span>}
+                  </div>
+                  <label className="admin-note-input">
+                    处理说明
+                    <textarea
+                      value={reportNotes[report.id] ?? ""}
+                      onChange={(e) => setReportNotes((prev) => ({ ...prev, [report.id]: e.target.value }))}
+                      placeholder="填写内部处理说明"
+                    />
+                  </label>
+                  <div className="admin-item-actions">
+                    <button onClick={() => handleReportAction(report, "TRIAGED")}><Flag size={14} /> 标记分诊</button>
+                    <button className="btn-success" onClick={() => handleReportAction(report, "RESOLVED")}><Check size={14} /> 处理完成</button>
+                    <button className="btn-danger" onClick={() => handleReportAction(report, "REJECTED")}><X size={14} /> 驳回</button>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+
+        {!adminLoading && section === "platform-links" && (
+          <div className="state-panel" style={{ borderStyle: "solid", padding: "3rem" }}>
+            <Link2 />
+            <p>平台外链仍由事件来源页写入</p>
+            <span>当前最小闭环优先支持真实举报、发布预检和来源抓取；平台外链新增仍使用 `/admin/events/:id/platform-links` 接口联调。</span>
           </div>
         )}
       </div>
@@ -1253,17 +1665,28 @@ export function App() {
 
   // Events list fetching state
   const [events, setEvents] = useState<EventListItemDto[]>([]);
+  const [eventResults, setEventResults] = useState<EventListItemDto[]>([]);
+  const [eventTotal, setEventTotal] = useState(0);
+  const [eventPage, setEventPage] = useState(1);
   const [loadingEvents, setLoadingEvents] = useState(true);
+  const [eventListError, setEventListError] = useState("");
 
   // Filters for Events Index
   const [searchQuery, setSearchQuery] = useState("");
   const [selectedTopic, setSelectedTopic] = useState<string>("");
   const [selectedStatus, setSelectedStatus] = useState<string>("");
+  const [selectedPlatform, setSelectedPlatform] = useState<string>("");
+  const [selectedSort, setSelectedSort] = useState<"updated" | "newest" | "oldest" | "sourceCount">("updated");
 
   useEffect(() => {
     setLoadingEvents(true);
     fetchEvents()
-      .then(setEvents)
+      .then((items) => {
+        setEvents(items);
+        setEventResults(items);
+        setEventTotal(items.length);
+      })
+      .catch((err) => setEventListError(err instanceof Error ? err.message : "事件列表加载失败"))
       .finally(() => setLoadingEvents(false));
   }, []);
 
@@ -1274,40 +1697,35 @@ export function App() {
     }
   }, [route]);
 
-  // Derived filter result for Events Page
-  const filteredEvents = useMemo(() => {
-    return events.filter((e) => {
-      const matchQuery =
-        e.neutralTitle.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        e.summary.toLowerCase().includes(searchQuery.toLowerCase());
-      
-      const matchTopic = selectedTopic ? e.topic?.slug === selectedTopic : true;
-      const matchStatus = selectedStatus ? e.eventProcessStatus === selectedStatus : true;
-      
-      return matchQuery && matchTopic && matchStatus;
-    });
-  }, [events, searchQuery, selectedTopic, selectedStatus]);
+  useEffect(() => {
+    setEventPage(1);
+  }, [searchQuery, selectedTopic, selectedStatus, selectedPlatform, selectedSort]);
 
-  // Derived Search results for Dedicated Search Page
-  const globalSearchVal = searchQuery;
-  const globalSearchResults = useMemo(() => {
-    if (!globalSearchVal.trim()) return { events: [], timelines: [] };
-    const query = globalSearchVal.toLowerCase();
-    
-    // Filter events
-    const matchingEvents = events.filter(
-      (e) => e.neutralTitle.toLowerCase().includes(query) || e.summary.toLowerCase().includes(query)
-    );
-    
-    return {
-      events: matchingEvents
-    };
-  }, [events, globalSearchVal]);
+  useEffect(() => {
+    if (route.name !== "events" && route.name !== "search") return;
+    setLoadingEvents(true);
+    setEventListError("");
+    fetchEventPage({
+      page: eventPage,
+      pageSize: 12,
+      query: searchQuery.trim() || undefined,
+      topic: selectedTopic || undefined,
+      eventProcessStatus: (selectedStatus as any) || undefined,
+      platform: (selectedPlatform as any) || undefined,
+      sort: selectedSort
+    })
+      .then((data) => {
+        setEventResults(data.items);
+        setEventTotal(data.total);
+      })
+      .catch((err) => setEventListError(err instanceof Error ? err.message : "事件列表加载失败"))
+      .finally(() => setLoadingEvents(false));
+  }, [route.name, eventPage, searchQuery, selectedTopic, selectedStatus, selectedPlatform, selectedSort]);
 
   let pageContent: React.ReactNode;
 
   if (route.name === "home") {
-    // Sort events for 讨论度量榜: by sourceCount descending, then updatedAt descending
+    // Sort events for source completeness by sourceCount descending, then updatedAt descending
     const rankedEvents = [...events].sort((a, b) => {
       const aCount = a.discussionMetrics?.sourceCount ?? a.sourceCount;
       const bCount = b.discussionMetrics?.sourceCount ?? b.sourceCount;
@@ -1317,17 +1735,18 @@ export function App() {
 
     pageContent = (
       <main className="animate-fade">
+        <DevFallbackNotice />
         <section className="hero">
           <div className="hero-copy">
-            <p className="eyebrow">Public Record & Fact Archive / 圈内风波簿</p>
-            <h1>圈内风波，<br />也需要长记忆</h1>
+            <p className="eyebrow">Public Record & Fact Archive / 公共事件长记忆档案馆</p>
+            <h1>公共事件，<br />需要可复核记忆</h1>
             <p>
-              本馆面向互联网小范围 ACG、游戏及粉丝圈子争议事件进行长期事实存照，提供克制、中立、高信息密度的事件线索，区分事实、言论、证据与争议，保留可复核的传播过程。
+              本馆面向公开公共争议事件进行长期事实存照，提供克制、中立、高信息密度的资料索引，区分事实、说法、证据与争议，保留可复核的传播过程。
             </p>
             <div className="hero-actions">
               <button onClick={() => navigate("/events")}>
                 <Archive size={18} />
-                查阅风波索引
+                查阅档案索引
               </button>
               <button className="ghost" onClick={() => navigate("/methodology")}>
                 <BookOpen size={18} />
@@ -1352,12 +1771,12 @@ export function App() {
           </div>
         </section>
 
-        {/* 今日小风波候选 */}
+        {/* 待核验线索池 */}
         <section className="candidates-band" style={{ padding: "4rem 2rem", borderBottom: "1px solid var(--border-color)" }}>
           <div className="section-heading">
             <div>
-              <p className="eyebrow">Controversy Candidates / 待建档库</p>
-              <h2>今日小风波候选</h2>
+              <p className="eyebrow">Pending Signals / 待建档库</p>
+              <h2>待核验线索池</h2>
             </div>
           </div>
           <div className="candidates-grid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: "1.5rem" }}>
@@ -1394,15 +1813,15 @@ export function App() {
           </div>
         </section>
 
-        {/* 讨论度量榜 */}
+        {/* 资料完整度与更新度 */}
         <section className="ranking-band" style={{ padding: "4rem 2rem", borderBottom: "1px solid var(--border-color)" }}>
           <div className="section-heading" style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-end", flexWrap: "wrap", gap: "1rem" }}>
             <div>
-              <p className="eyebrow">Discussion Metrics Ranking / 统计度量</p>
-              <h2>讨论度量榜</h2>
+              <p className="eyebrow">Source Completeness / 统计度量</p>
+              <h2>资料完整度与更新度</h2>
             </div>
             <span className="ranking-disclaimer" style={{ fontSize: "0.85rem", color: "var(--accent-crimson)", fontWeight: 500 }}>
-              按公开来源数量与更新时间排序，不代表事实判断。
+              按公开来源数量与更新时间整理，不代表事实判断。
             </span>
           </div>
           <div className="ranking-list" style={{ display: "flex", flexDirection: "column", gap: "1rem" }}>
@@ -1417,7 +1836,7 @@ export function App() {
               return (
                 <div key={event.id} className="ranking-item" style={{ display: "flex", backgroundColor: "var(--bg-card)", border: "1px solid var(--border-color)", borderRadius: "var(--radius-sm)", overflow: "hidden" }}>
                   <div className="ranking-rank" style={{ width: "60px", display: "flex", alignItems: "center", justifyContent: "center", backgroundColor: "var(--bg-stamp)", color: "var(--text-primary)", fontSize: "1.5rem", fontFamily: "var(--font-mono)", fontWeight: 700, borderRight: "1px solid var(--border-color)" }}>
-                    #{index + 1}
+                    {index + 1}
                   </div>
                   <div className="ranking-cover" style={{ width: "132px", minHeight: "132px", borderRight: "1px solid var(--border-color)", backgroundColor: "var(--bg-stamp)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-tertiary)", fontSize: "0.8rem", textAlign: "center", padding: "0.8rem", position: "relative", overflow: "hidden" }}>
                     {event.coverImage?.url ? (
@@ -1497,6 +1916,7 @@ export function App() {
 
     pageContent = (
       <main className="page-shell">
+        <DevFallbackNotice />
         <div className="section-heading">
           <div>
             <p className="eyebrow">Dossier Indexes / 卷宗索引</p>
@@ -1560,29 +1980,80 @@ export function App() {
               }}
             >
               <option value="">全部进展状态</option>
-              <option value="UNVERIFIED">未核实</option>
-              <option value="DEVELOPING">发酵中</option>
-              <option value="PLATFORM_INTERVENED">平台介入</option>
-              <option value="OFFICIAL_INVESTIGATION">官方调查</option>
-              <option value="LEGAL_PROCESS">司法程序</option>
-              <option value="CONCLUDED">已有结论</option>
+              <option value="UNVERIFIED">材料收集中</option>
+              <option value="DEVELOPING">讨论扩散中</option>
+              <option value="PLATFORM_INTERVENED">平台回应后</option>
+              <option value="OFFICIAL_INVESTIGATION">机构核验中</option>
+              <option value="LEGAL_PROCESS">程序推进中</option>
+              <option value="CONCLUDED">阶段性收束</option>
+            </select>
+
+            <select
+              value={selectedPlatform}
+              onChange={(e) => setSelectedPlatform(e.target.value)}
+              style={{
+                backgroundColor: "var(--bg-card)",
+                border: "1px solid var(--border-color)",
+                color: "var(--text-secondary)",
+                borderRadius: "var(--radius-sm)",
+                padding: "0.2rem 0.5rem",
+                fontSize: "0.9rem",
+                outline: "none"
+              }}
+            >
+              <option value="">全部平台</option>
+              <option value="BILIBILI">B站</option>
+              <option value="XIAOHONGSHU">小红书</option>
+              <option value="WEIBO">微博</option>
+              <option value="DOUYIN">抖音</option>
+              <option value="ZHIHU">知乎</option>
+              <option value="OTHER">其他</option>
+            </select>
+
+            <select
+              value={selectedSort}
+              onChange={(e) => setSelectedSort(e.target.value as typeof selectedSort)}
+              style={{
+                backgroundColor: "var(--bg-card)",
+                border: "1px solid var(--border-color)",
+                color: "var(--text-secondary)",
+                borderRadius: "var(--radius-sm)",
+                padding: "0.2rem 0.5rem",
+                fontSize: "0.9rem",
+                outline: "none"
+              }}
+            >
+              <option value="updated">最近更新</option>
+              <option value="newest">发生时间较新</option>
+              <option value="oldest">发生时间较早</option>
+              <option value="sourceCount">来源数量</option>
             </select>
           </div>
         </div>
 
-        {loadingEvents ? (
+        {eventListError ? (
+          <ErrorState title="档案索引加载失败" body={eventListError} onRetry={() => window.location.reload()} />
+        ) : loadingEvents ? (
           <LoadingState />
-        ) : filteredEvents.length === 0 ? (
+        ) : eventResults.length === 0 ? (
           <EmptyState
             title="未检索到匹配的档案"
             body="建议尝试清除筛选条件，或使用不同的搜索词再次检索。"
           />
         ) : (
-          <div className="event-grid">
-            {filteredEvents.map((event) => (
-              <EventCard key={event.id} event={event} />
-            ))}
-          </div>
+          <>
+            <div className="result-count">共匹配 {eventTotal} 个公开档案</div>
+            <div className="event-grid">
+              {eventResults.map((event) => (
+                <EventCard key={event.id} event={event} />
+              ))}
+            </div>
+            <div className="pagination-row">
+              <button disabled={eventPage <= 1} onClick={() => setEventPage((page) => Math.max(1, page - 1))}>上一页</button>
+              <span>第 {eventPage} 页</span>
+              <button disabled={eventPage * 12 >= eventTotal} onClick={() => setEventPage((page) => page + 1)}>下一页</button>
+            </div>
+          </>
         )}
       </main>
     );
@@ -1595,6 +2066,7 @@ export function App() {
   if (route.name === "search") {
     pageContent = (
       <SimplePage title="全文卷宗检索" eyebrow="Search Database" icon={<Search size={22} />}>
+        <DevFallbackNotice />
         <div className="search-panel">
           <input
             type="text"
@@ -1612,12 +2084,16 @@ export function App() {
 
         {searchQuery.trim() ? (
           <div className="search-results-section animate-fade">
-            <h2>匹配到的在册事件 ({globalSearchResults.events.length})</h2>
-            {globalSearchResults.events.length === 0 ? (
+            <h2>匹配到的在册事件 ({eventTotal})</h2>
+            {eventListError ? (
+              <ErrorState title="检索失败" body={eventListError} onRetry={() => window.location.reload()} />
+            ) : loadingEvents ? (
+              <LoadingState />
+            ) : eventResults.length === 0 ? (
               <p style={{ color: "var(--text-tertiary)", fontSize: "0.95rem" }}>暂无匹配的事件卷宗。</p>
             ) : (
               <div className="event-grid">
-                {globalSearchResults.events.map((event) => (
+                {eventResults.map((event) => (
                   <EventCard key={event.id} event={event} />
                 ))}
               </div>
@@ -1751,7 +2227,7 @@ export function App() {
   if (route.name === "submit") {
     pageContent = (
       <SimplePage title="提交事件线索" eyebrow="Submit Clues" icon={<FileSearch size={22} />}>
-        <FormStub kind="submit" />
+        <PublicFeedbackForm kind="submit" />
       </SimplePage>
     );
   }
@@ -1759,7 +2235,7 @@ export function App() {
   if (route.name === "correction") {
     pageContent = (
       <SimplePage title="提交纠错申请" eyebrow="Dossier Correction" icon={<CheckCircle2 size={22} />}>
-        <FormStub kind="correction" />
+        <PublicFeedbackForm kind="correction" />
       </SimplePage>
     );
   }
@@ -1767,7 +2243,7 @@ export function App() {
   if (route.name === "report") {
     pageContent = (
       <SimplePage title="紧急申诉与侵权举报" eyebrow="Safety Report Center" icon={<Flag size={22} />}>
-        <FormStub kind="report" />
+        <PublicFeedbackForm kind="report" />
       </SimplePage>
     );
   }
@@ -1791,7 +2267,7 @@ export function App() {
       <Header theme={theme} toggleTheme={toggleTheme} session={session} onLogout={handleLogout} />
       {pageContent}
       <footer>
-        <span>圈内风波簿 © 2026 / 互联网长记忆项目</span>
+        <span>公共事件长记忆档案馆 © 2026 / 互联网长记忆项目</span>
         {session.role === "ADMIN" && (
           <button onClick={() => navigate("/admin/events")}>
             进入编辑工作台

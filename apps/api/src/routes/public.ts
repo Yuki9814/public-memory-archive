@@ -24,7 +24,7 @@ export async function registerPublicRoutes(app: FastifyInstance) {
     const query = eventListQuerySchema.parse(request.query);
     const where: Prisma.EventWhereInput = {};
 
-    where.editorialStatus = query.editorialStatus ?? "PUBLISHED";
+    where.editorialStatus = "PUBLISHED";
 
     if (query.query) {
       where.OR = [

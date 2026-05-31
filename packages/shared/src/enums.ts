@@ -167,6 +167,9 @@ export const reportTypes = [
 ] as const;
 export type ReportType = (typeof reportTypes)[number];
 
+export const reportStatuses = ["PENDING", "TRIAGED", "RESOLVED", "REJECTED"] as const;
+export type ReportStatus = (typeof reportStatuses)[number];
+
 export const correctionStatuses = ["PENDING", "ACCEPTED", "REJECTED", "RESOLVED"] as const;
 export type CorrectionStatus = (typeof correctionStatuses)[number];
 
