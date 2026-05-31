@@ -1,0 +1,639 @@
+generator client {
+  provider   = "prisma-client-js"
+  output     = "../generated/client"
+  engineType = "binary"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum EditorialStatus {
+  DRAFT
+  PENDING_REVIEW
+  PUBLISHED
+  UNPUBLISHED
+  ARCHIVED
+}
+
+enum EventProcessStatus {
+  UNVERIFIED
+  DEVELOPING
+  PLATFORM_INTERVENED
+  OFFICIAL_INVESTIGATION
+  LEGAL_PROCESS
+  CONCLUDED
+}
+
+enum ActorType {
+  PERSON
+  ORGANIZATION
+  PLATFORM
+  MEDIA
+  AUTHORITY
+  OTHER
+}
+
+enum ActorRole {
+  COMPLAINANT
+  RESPONDENT
+  WITNESS
+  PLATFORM
+  OFFICIAL
+  MEDIA
+  THIRD_PARTY
+  OTHER
+}
+
+enum PrivacyLevel {
+  PUBLIC
+  PSEUDONYMIZED
+  HIGH
+  MINOR_PROTECTED
+}
+
+enum SourceType {
+  ORIGINAL_POST
+  RESPONSE
+  OFFICIAL_NOTICE
+  MEDIA_REPORT
+  VIDEO
+  NOTE
+  SCREENSHOT
+  DOCUMENT
+  OTHER
+}
+
+enum ReliabilityLevel {
+  A_STRONG
+  B_DIRECT
+  C_INDIRECT
+  D_WEAK
+  UNKNOWN
+}
+
+enum Platform {
+  BILIBILI
+  XIAOHONGSHU
+  WEIBO
+  DOUYIN
+  ZHIHU
+  OTHER
+}
+
+enum ContentKind {
+  VIDEO
+  NOTE
+  POST
+  ARTICLE
+  COMMENT
+  IMAGE
+  OTHER
+}
+
+enum AvailabilityStatus {
+  AVAILABLE
+  DELETED
+  PRIVATE
+  LOGIN_REQUIRED
+  UNKNOWN
+  ARCHIVED_ONLY
+}
+
+enum CaptureStatus {
+  QUEUED
+  RUNNING
+  SUCCEEDED
+  FAILED
+  SKIPPED
+}
+
+enum ClaimStatus {
+  UNVERIFIED
+  INSUFFICIENT_EVIDENCE
+  DISPUTED
+  PARTIALLY_SUPPORTED
+  SUPPORTED
+  REFUTED
+}
+
+enum ClaimImportance {
+  KEY
+  CONTEXT
+  LOW
+}
+
+enum EvidenceKind {
+  DOCUMENT
+  SCREENSHOT
+  VIDEO
+  AUDIO
+  POST
+  COMMENT
+  ARTICLE
+  ARCHIVE_CAPTURE
+  OTHER
+}
+
+enum RelationType {
+  SUPPORTS
+  OPPOSES
+  NEUTRAL
+  COMPLICATES
+}
+
+enum CorrectionStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  RESOLVED
+}
+
+enum ReportType {
+  PRIVACY_LEAK
+  DOXXING
+  DEFAMATION_RISK
+  MINOR_INFO
+  HARASSMENT
+  COPYRIGHT
+  OTHER
+}
+
+enum ReportStatus {
+  PENDING
+  TRIAGED
+  RESOLVED
+  REJECTED
+}
+
+enum SubmissionStatus {
+  PENDING
+  REVIEWED
+  ACCEPTED
+  REJECTED
+}
+
+enum ReviewTaskStatus {
+  OPEN
+  IN_REVIEW
+  APPROVED
+  CHANGES_REQUESTED
+  CLOSED
+}
+
+enum TaskType {
+  CAPTURE_SOURCE
+  RECAPTURE_LINK
+  CHECK_LINK
+  WAYBACK_SAVE
+  HASH_ARCHIVE
+  OTHER
+}
+
+enum TaskStatus {
+  QUEUED
+  ACTIVE
+  COMPLETED
+  FAILED
+  CANCELED
+}
+
+enum UserRole {
+  ADMIN
+  EDITOR
+  REVIEWER
+  VIEWER
+}
+
+enum AuditAction {
+  CREATED
+  UPDATED
+  REVIEW_REQUESTED
+  PUBLISHED
+  UNPUBLISHED
+  CAPTURE_REQUESTED
+  REPORT_RESOLVED
+  AI_SUGGESTED
+}
+
+model Event {
+  id                 String             @id @default(cuid())
+  slug               String             @unique
+  title              String
+  neutralTitle       String             @map("neutral_title")
+  summary            String
+  editorialStatus    EditorialStatus    @default(DRAFT) @map("editorial_status")
+  eventProcessStatus EventProcessStatus @default(UNVERIFIED) @map("event_process_status")
+  occurredAt         DateTime?          @map("occurred_at")
+  firstPublishedAt   DateTime?          @map("first_published_at")
+  correctionEnabled  Boolean            @default(true) @map("correction_enabled")
+  reportEnabled      Boolean            @default(true) @map("report_enabled")
+  whatWeKnow         Json               @default("[]") @map("what_we_know")
+  whatIsDisputed     Json               @default("[]") @map("what_is_disputed")
+  whatNotToInfer     Json               @default("[]") @map("what_not_to_infer")
+  latestUpdates      Json               @default("[]") @map("latest_updates")
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
+  topicId            String?            @map("topic_id")
+  topic              Topic?             @relation(fields: [topicId], references: [id], onDelete: SetNull)
+  eventActors        EventActor[]
+  sources            Source[]
+  timelineEntries    TimelineEntry[]
+  claims             Claim[]
+  evidenceItems      EvidenceItem[]
+  eventVersions      EventVersion[]
+  corrections        Correction[]
+  reports            Report[]
+  tags               EventTag[]
+  submissions        Submission[]
+  reviewTasks        ReviewTask[]
+  editorNotes        EditorNote[]
+
+  @@index([editorialStatus])
+  @@index([eventProcessStatus])
+  @@index([occurredAt])
+  @@map("events")
+}
+
+model Actor {
+  id            String       @id @default(cuid())
+  displayName   String       @map("display_name")
+  legalName     String?      @map("legal_name")
+  actorType     ActorType    @default(PERSON) @map("actor_type")
+  privacyLevel  PrivacyLevel @default(PSEUDONYMIZED) @map("privacy_level")
+  privacyNote   String?      @map("privacy_note")
+  isMinor       Boolean      @default(false) @map("is_minor")
+  createdAt     DateTime     @default(now()) @map("created_at")
+  updatedAt     DateTime     @updatedAt @map("updated_at")
+  eventActors   EventActor[]
+  claims        Claim[]
+
+  @@index([privacyLevel])
+  @@map("actors")
+}
+
+model EventActor {
+  id                 String    @id @default(cuid())
+  eventId            String    @map("event_id")
+  actorId            String    @map("actor_id")
+  role               ActorRole
+  displayNameOverride String?  @map("display_name_override")
+  involvementSummary String?   @map("involvement_summary")
+  sortOrder          Int       @default(0) @map("sort_order")
+  event              Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  actor              Actor     @relation(fields: [actorId], references: [id], onDelete: Restrict)
+
+  @@unique([eventId, actorId, role])
+  @@index([actorId])
+  @@map("event_actors")
+}
+
+model Source {
+  id              String                @id @default(cuid())
+  eventId         String                @map("event_id")
+  title           String
+  url             String?
+  sourceType      SourceType            @default(OTHER) @map("source_type")
+  reliabilityLevel ReliabilityLevel     @default(UNKNOWN) @map("reliability_level")
+  publisher       String?
+  authorDisplay   String?               @map("author_display")
+  publishedAt     DateTime?             @map("published_at")
+  summary         String
+  sourceHash      String?               @map("source_hash")
+  createdAt       DateTime              @default(now()) @map("created_at")
+  updatedAt       DateTime              @updatedAt @map("updated_at")
+  event           Event                 @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  platformLinks   SourcePlatformLink[]
+  captures        ArchiveCapture[]
+  timelineEntries TimelineEntry[]
+  evidenceItems   EvidenceItem[]
+  claims          Claim[]
+  corrections     Correction[]
+  reports         Report[]
+
+  @@index([eventId])
+  @@index([reliabilityLevel])
+  @@map("sources")
+}
+
+model SourcePlatformLink {
+  id                 String             @id @default(cuid())
+  sourceId           String             @map("source_id")
+  platform           Platform
+  contentKind        ContentKind        @map("content_kind")
+  originalUrl        String             @map("original_url")
+  canonicalUrl       String?            @map("canonical_url")
+  title              String
+  description        String
+  authorDisplay      String?            @map("author_display")
+  thumbnailUrl       String?            @map("thumbnail_url")
+  publishedAt        DateTime?          @map("published_at")
+  capturedAt         DateTime?          @map("captured_at")
+  availabilityStatus AvailabilityStatus @default(UNKNOWN) @map("availability_status")
+  engagementSnapshot Json?              @map("engagement_snapshot")
+  archiveUrl         String?            @map("archive_url")
+  displayOrder       Int                @default(0) @map("display_order")
+  createdAt          DateTime           @default(now()) @map("created_at")
+  updatedAt          DateTime           @updatedAt @map("updated_at")
+  source             Source             @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  captures           ArchiveCapture[]
+  reports            Report[]
+
+  @@index([sourceId])
+  @@index([platform])
+  @@map("source_platform_links")
+}
+
+model ArchiveCapture {
+  id              String        @id @default(cuid())
+  sourceId        String        @map("source_id")
+  platformLinkId  String?       @map("platform_link_id")
+  taskId          String?       @map("task_id")
+  originalUrl     String        @map("original_url")
+  finalUrl        String?       @map("final_url")
+  screenshotUrl   String?       @map("screenshot_url")
+  htmlSnapshotUrl String?       @map("html_snapshot_url")
+  waybackUrl      String?       @map("wayback_url")
+  contentHash     String?       @map("content_hash")
+  captureStatus   CaptureStatus @default(QUEUED) @map("capture_status")
+  errorMessage    String?       @map("error_message")
+  capturedAt      DateTime?     @map("captured_at")
+  nextRecaptureAt DateTime?     @map("next_recapture_at")
+  createdAt       DateTime      @default(now()) @map("created_at")
+  updatedAt       DateTime      @updatedAt @map("updated_at")
+  source          Source        @relation(fields: [sourceId], references: [id], onDelete: Cascade)
+  platformLink    SourcePlatformLink? @relation(fields: [platformLinkId], references: [id], onDelete: SetNull)
+  task            Task?         @relation(fields: [taskId], references: [id], onDelete: SetNull)
+
+  @@index([sourceId])
+  @@index([taskId])
+  @@index([captureStatus])
+  @@map("archive_captures")
+}
+
+model TimelineEntry {
+  id         String   @id @default(cuid())
+  eventId    String   @map("event_id")
+  sourceId   String?  @map("source_id")
+  title      String
+  body       String
+  happenedAt DateTime @map("happened_at")
+  sortOrder  Int      @default(0) @map("sort_order")
+  createdAt  DateTime @default(now()) @map("created_at")
+  updatedAt  DateTime @updatedAt @map("updated_at")
+  event      Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  source     Source?  @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+
+  @@index([eventId, happenedAt])
+  @@index([sourceId])
+  @@map("timeline_entries")
+}
+
+model Claim {
+  id              String          @id @default(cuid())
+  eventId         String          @map("event_id")
+  claimantActorId String?         @map("claimant_actor_id")
+  sourceId        String?         @map("source_id")
+  title           String
+  statement       String
+  status          ClaimStatus     @default(UNVERIFIED)
+  importance      ClaimImportance @default(CONTEXT)
+  createdAt       DateTime        @default(now()) @map("created_at")
+  updatedAt       DateTime        @updatedAt @map("updated_at")
+  event           Event           @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  claimantActor   Actor?          @relation(fields: [claimantActorId], references: [id], onDelete: SetNull)
+  source          Source?         @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+  evidenceLinks   ClaimEvidenceLink[]
+
+  @@index([eventId])
+  @@index([status])
+  @@map("claims")
+}
+
+model EvidenceItem {
+  id               String           @id @default(cuid())
+  eventId          String           @map("event_id")
+  sourceId         String?          @map("source_id")
+  title            String
+  description      String
+  evidenceKind     EvidenceKind     @default(OTHER) @map("evidence_kind")
+  reliabilityLevel ReliabilityLevel @default(UNKNOWN) @map("reliability_level")
+  storageUrl       String?          @map("storage_url")
+  externalUrl      String?          @map("external_url")
+  capturedAt       DateTime?        @map("captured_at")
+  metadata         Json?
+  createdAt        DateTime         @default(now()) @map("created_at")
+  updatedAt        DateTime         @updatedAt @map("updated_at")
+  event            Event            @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  source           Source?          @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+  claimLinks       ClaimEvidenceLink[]
+
+  @@index([eventId])
+  @@index([reliabilityLevel])
+  @@map("evidence_items")
+}
+
+model ClaimEvidenceLink {
+  id           String       @id @default(cuid())
+  claimId      String       @map("claim_id")
+  evidenceId   String       @map("evidence_id")
+  relationType RelationType @map("relation_type")
+  notes        String?
+  createdAt    DateTime     @default(now()) @map("created_at")
+  claim        Claim        @relation(fields: [claimId], references: [id], onDelete: Cascade)
+  evidence     EvidenceItem @relation(fields: [evidenceId], references: [id], onDelete: Cascade)
+
+  @@unique([claimId, evidenceId, relationType])
+  @@index([evidenceId])
+  @@map("claim_evidence_links")
+}
+
+model EventVersion {
+  id             String   @id @default(cuid())
+  eventId        String   @map("event_id")
+  versionNumber  Int      @map("version_number")
+  snapshotBefore Json     @map("snapshot_before")
+  snapshotAfter  Json     @map("snapshot_after")
+  changeSummary  String   @map("change_summary")
+  createdByUserId String? @map("created_by_user_id")
+  createdAt      DateTime @default(now()) @map("created_at")
+  event          Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  createdBy      User?    @relation(fields: [createdByUserId], references: [id], onDelete: SetNull)
+
+  @@unique([eventId, versionNumber])
+  @@index([eventId])
+  @@map("event_versions")
+}
+
+model Correction {
+  id        String           @id @default(cuid())
+  eventId   String?          @map("event_id")
+  sourceId  String?          @map("source_id")
+  email     String?
+  title     String
+  body      String
+  status    CorrectionStatus @default(PENDING)
+  createdAt DateTime         @default(now()) @map("created_at")
+  updatedAt DateTime         @updatedAt @map("updated_at")
+  event     Event?           @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  source    Source?          @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+
+  @@index([eventId])
+  @@index([status])
+  @@map("corrections")
+}
+
+model Report {
+  id             String       @id @default(cuid())
+  eventId        String?      @map("event_id")
+  sourceId       String?      @map("source_id")
+  platformLinkId String?      @map("platform_link_id")
+  reportType     ReportType   @default(OTHER) @map("report_type")
+  reporterEmail  String?      @map("reporter_email")
+  body           String
+  status         ReportStatus @default(PENDING)
+  priority       Int          @default(0)
+  resolutionNotes String?     @map("resolution_notes")
+  resolvedAt     DateTime?    @map("resolved_at")
+  createdAt      DateTime     @default(now()) @map("created_at")
+  updatedAt      DateTime     @updatedAt @map("updated_at")
+  event          Event?       @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  source         Source?      @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+  platformLink   SourcePlatformLink? @relation(fields: [platformLinkId], references: [id], onDelete: SetNull)
+
+  @@index([eventId])
+  @@index([status])
+  @@map("reports")
+}
+
+model Topic {
+  id          String  @id @default(cuid())
+  slug        String  @unique
+  name        String
+  description String?
+  events      Event[]
+
+  @@map("topics")
+}
+
+model Tag {
+  id          String     @id @default(cuid())
+  slug        String     @unique
+  label       String
+  description String?
+  events      EventTag[]
+
+  @@map("tags")
+}
+
+model EventTag {
+  id      String @id @default(cuid())
+  eventId String @map("event_id")
+  tagId   String @map("tag_id")
+  event   Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  tag     Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([eventId, tagId])
+  @@index([tagId])
+  @@map("event_tags")
+}
+
+model Submission {
+  id        String           @id @default(cuid())
+  eventId   String?          @map("event_id")
+  email     String?
+  title     String
+  body      String
+  sourceUrl String?          @map("source_url")
+  status    SubmissionStatus @default(PENDING)
+  createdAt DateTime         @default(now()) @map("created_at")
+  updatedAt DateTime         @updatedAt @map("updated_at")
+  event     Event?           @relation(fields: [eventId], references: [id], onDelete: SetNull)
+
+  @@index([eventId])
+  @@index([status])
+  @@map("submissions")
+}
+
+model ReviewTask {
+  id               String           @id @default(cuid())
+  eventId          String           @map("event_id")
+  assignedToUserId String?          @map("assigned_to_user_id")
+  status           ReviewTaskStatus @default(OPEN)
+  notes            String?
+  createdAt        DateTime         @default(now()) @map("created_at")
+  updatedAt        DateTime         @updatedAt @map("updated_at")
+  event            Event            @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  assignedTo       User?            @relation(fields: [assignedToUserId], references: [id], onDelete: SetNull)
+
+  @@index([eventId])
+  @@index([status])
+  @@map("review_tasks")
+}
+
+model Task {
+  id           String     @id @default(cuid())
+  type         TaskType
+  status       TaskStatus @default(QUEUED)
+  progress     Int        @default(0)
+  subjectType  String?    @map("subject_type")
+  subjectId    String?    @map("subject_id")
+  payload      Json       @default("{}")
+  result       Json?
+  errorMessage String?    @map("error_message")
+  createdAt    DateTime   @default(now()) @map("created_at")
+  updatedAt    DateTime   @updatedAt @map("updated_at")
+  completedAt  DateTime?  @map("completed_at")
+  captures     ArchiveCapture[]
+
+  @@index([status])
+  @@index([type])
+  @@map("tasks")
+}
+
+model User {
+  id            String         @id @default(cuid())
+  email         String         @unique
+  displayName   String         @map("display_name")
+  role          UserRole       @default(EDITOR)
+  createdAt     DateTime       @default(now()) @map("created_at")
+  updatedAt     DateTime       @updatedAt @map("updated_at")
+  eventVersions EventVersion[]
+  reviewTasks   ReviewTask[]
+  editorNotes   EditorNote[]
+  auditLogs     AuditLog[]
+
+  @@map("users")
+}
+
+model EditorNote {
+  id        String   @id @default(cuid())
+  eventId   String   @map("event_id")
+  userId    String?  @map("user_id")
+  body      String
+  visibility String  @default("INTERNAL")
+  createdAt DateTime @default(now()) @map("created_at")
+  event     Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([eventId])
+  @@map("editor_notes")
+}
+
+model AuditLog {
+  id         String      @id @default(cuid())
+  userId     String?     @map("user_id")
+  entityType String      @map("entity_type")
+  entityId   String      @map("entity_id")
+  action     AuditAction
+  before     Json?
+  after      Json?
+  metadata   Json?
+  createdAt  DateTime    @default(now()) @map("created_at")
+  user       User?       @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([action])
+  @@map("audit_logs")
+}

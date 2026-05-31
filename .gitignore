@@ -1,0 +1,16 @@
+node_modules/
+dist/
+dist-types/
+coverage/
+.DS_Store
+.env
+.env.*
+!.env.example
+*.log
+*.tsbuildinfo
+packages/db/generated/
+storage/
+tmp/
+logs/
+*.db
+*.sqlite
