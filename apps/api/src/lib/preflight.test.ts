@@ -80,3 +80,44 @@ test("publish preflight enforces minor privacy level and high-privacy notes, plu
   assert.ok(codes.includes("HIGH_PRIVACY_NOTE_REQUIRED"));
   assert.ok(codes.includes("SENSITIVE_PERSONAL_INFO"));
 });
+
+test("publish preflight scans visible source, platform link, and evidence text", () => {
+  const failed = runPublishPreflight(
+    mockPreflightEvent({
+      title: "事件",
+      neutralTitle: "事件",
+      summary: "摘要",
+      sources: [
+        {
+          id: "s1",
+          title: "源",
+          url: "https://example.com/source",
+          authorDisplay: "联系电话 13800138000",
+          reliabilityLevel: "A_STRONG",
+          platformLinks: [
+            {
+              id: "p1",
+              title: "平台帖",
+              description: "平台描述",
+              originalUrl: "https://example.com/post?id=110101199001011234",
+              canonicalUrl: "https://example.com/post"
+            }
+          ]
+        }
+      ],
+      timelineEntries: [{ id: "t1", sourceId: "s1", title: "t", body: "正常时间线" }],
+      claims: [{ id: "c1", importance: "KEY", status: "SUPPORTED", evidenceLinks: [{ id: "l1" }] }],
+      evidenceItems: [
+        {
+          id: "e1",
+          title: "证据",
+          description: "证据说明",
+          externalUrl: "https://example.com/evidence?phone=13900139000"
+        }
+      ],
+      eventVersions: [{ id: "v1" }]
+    })
+  );
+
+  assert.ok(failed.some((item) => item.code === "SENSITIVE_PERSONAL_INFO"));
+});

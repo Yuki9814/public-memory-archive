@@ -31,9 +31,9 @@ export const paginationQuerySchema = z.object({
 });
 
 export const eventListQuerySchema = paginationQuerySchema.extend({
-  query: z.string().trim().optional(),
-  topic: z.string().trim().optional(),
-  tag: z.string().trim().optional(),
+  query: z.string().trim().max(120).optional(),
+  topic: z.string().trim().max(120).optional(),
+  tag: z.string().trim().max(120).optional(),
   editorialStatus: z.enum(editorialStatuses).optional(),
   eventProcessStatus: z.enum(eventProcessStatuses).optional(),
   platform: z.enum(platforms).optional(),
@@ -48,6 +48,13 @@ export const eventListQuerySchema = paginationQuerySchema.extend({
 }, {
   message: "dateFrom must be less than or equal to dateTo",
   path: ["dateFrom"]
+});
+
+export const searchResultTypes = ["event", "source", "claim", "revision"] as const;
+
+export const searchQuerySchema = paginationQuerySchema.extend({
+  q: z.string().trim().min(1).max(120),
+  type: z.enum(searchResultTypes).optional()
 });
 
 export const createEventSchema = z.object({

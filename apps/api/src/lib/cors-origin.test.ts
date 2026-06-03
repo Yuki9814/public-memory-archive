@@ -11,6 +11,7 @@ const originalEnv = {
   adminDisplayName: process.env.ADMIN_DISPLAY_NAME,
   adminPasscode: process.env.ADMIN_PASSCODE,
   adminSessionSecret: process.env.ADMIN_SESSION_SECRET,
+  nodeEnv: process.env.NODE_ENV,
   publicSiteUrl: process.env.PUBLIC_SITE_URL
 };
 
@@ -18,6 +19,7 @@ function restoreEnv() {
   setEnv("ADMIN_DISPLAY_NAME", originalEnv.adminDisplayName);
   setEnv("ADMIN_PASSCODE", originalEnv.adminPasscode);
   setEnv("ADMIN_SESSION_SECRET", originalEnv.adminSessionSecret);
+  setEnv("NODE_ENV", originalEnv.nodeEnv);
   setEnv("PUBLIC_SITE_URL", originalEnv.publicSiteUrl);
 }
 
@@ -91,6 +93,22 @@ describe("CORS origin helper", () => {
 
     assert.equal(isOriginAllowed("http://localhost:9999"), true);
     assert.equal(isOriginAllowed("https://evil.example.net"), false);
+  });
+
+  it("fails closed when production PUBLIC_SITE_URL is missing or invalid", () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.PUBLIC_SITE_URL;
+
+    assert.throws(() => getConfiguredCorsOrigin(), /PUBLIC_SITE_URL is required in production/);
+    assert.equal(isOriginAllowed("https://archive.example.com"), false);
+
+    process.env.PUBLIC_SITE_URL = "http://localhost:5173";
+    assert.throws(() => getConfiguredCorsOrigin(), /PUBLIC_SITE_URL must be a valid http\(s\) URL in production/);
+    assert.equal(isOriginAllowed("http://localhost:5173"), false);
+
+    process.env.PUBLIC_SITE_URL = "https://archive.example.com";
+    assert.equal(isOriginAllowed("https://archive.example.com"), true);
+    assert.equal(isOriginAllowed("http://localhost:5173"), false);
   });
 });
 
@@ -168,5 +186,15 @@ describe("CORS integration", () => {
 
     assert.equal(response.statusCode, 200);
     assert.notEqual(response.headers["access-control-allow-origin"], "*");
+  });
+
+  it("refuses to start in production without an HTTPS public origin", async () => {
+    process.env.NODE_ENV = "production";
+    delete process.env.PUBLIC_SITE_URL;
+
+    await assert.rejects(() => buildApp(), /PUBLIC_SITE_URL is required in production/);
+
+    process.env.PUBLIC_SITE_URL = "http://localhost:5173";
+    await assert.rejects(() => buildApp(), /PUBLIC_SITE_URL must be a valid http\(s\) URL in production/);
   });
 });

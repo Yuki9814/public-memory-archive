@@ -16,7 +16,7 @@ import { getAdminSession } from "../lib/auth.js";
 import { runPublishPreflight } from "../lib/preflight.js";
 import { getIdParam, getTaskIdParam } from "../lib/route-params.js";
 import { enqueueCaptureTask } from "../lib/task-queue.js";
-import { serializeEventSummary } from "../lib/serializers.js";
+import { serializeEventSummary, serializeSource } from "../lib/serializers.js";
 
 function adminUserId(request: FastifyRequest) {
   const session = getAdminSession(request);
@@ -72,6 +72,7 @@ async function loadPreflightEvent(eventId: string) {
       sources: { include: { platformLinks: true } },
       timelineEntries: true,
       claims: { include: { evidenceLinks: true } },
+      evidenceItems: true,
       eventVersions: true
     }
   });
@@ -184,6 +185,9 @@ export async function registerAdminRoutes(app: FastifyInstance) {
   app.patch("/admin/events/:id", { schema: { tags: ["admin"] } }, async (request, reply) => {
     const id = getIdParam(request);
     const body = updateEventSchema.parse(request.body);
+    if (body.editorialStatus === "PUBLISHED") {
+      return reply.code(400).send({ error: "PUBLISH_ROUTE_REQUIRED" });
+    }
     const before = await loadEventSnapshot(id);
     if (!before) return reply.code(404).send({ error: "EVENT_NOT_FOUND" });
     const event = await prisma.event.update({ where: { id }, data: body as any });
@@ -200,6 +204,17 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       }
     });
     return event;
+  });
+
+  app.get("/admin/events/:id/sources", { schema: { tags: ["admin"] } }, async (request, reply) => {
+    const id = getIdParam(request);
+    const event = await prisma.event.findUnique({ where: { id }, select: { id: true } });
+    if (!event) return reply.code(404).send({ error: "EVENT_NOT_FOUND" });
+    const sources = await prisma.source.findMany({
+      where: { eventId: id },
+      orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }]
+    });
+    return { items: sources.map(serializeSource) };
   });
 
   app.post("/admin/events/:id/sources", { schema: { tags: ["admin"] } }, async (request, reply) => {

@@ -7,7 +7,10 @@ import type {
   EventProcessStatus,
   Platform,
   RelationType,
-  ReliabilityLevel
+  ReliabilityLevel,
+  ReportStatus,
+  SubmissionStatus,
+  CorrectionStatus
 } from "./enums.js";
 
 export interface TagDto {
@@ -34,7 +37,9 @@ export interface DiscussionMetricsDto {
   discussionStage: string;
 }
 
-export type SessionDto = { role: "GUEST" } | { role: "ADMIN"; displayName: string };
+export type SessionDto =
+  | { role: "GUEST" }
+  | { role: "ADMIN"; displayName: string; userId?: string; csrfToken: string };
 
 export interface EventListItemDto {
   id: string;
@@ -146,6 +151,36 @@ export interface FailedCheck {
   code: string;
   message: string;
   path?: string;
+}
+
+export type SearchResultType = "event" | "source" | "claim" | "revision";
+
+export interface SearchResultDto {
+  id: string;
+  type: SearchResultType;
+  matchedField: string;
+  snippet: string;
+  updatedAt: string;
+  event: EventListItemDto;
+}
+
+export interface EventFacetsDto {
+  topics: Array<{ slug: string; name: string; count: number }>;
+  tags: Array<{ slug: string; label: string; count: number }>;
+  platforms: Array<{ platform: Platform; count: number }>;
+  statuses: Array<{ status: EventProcessStatus; label: string; count: number }>;
+}
+
+export type FeedbackKind = "submission" | "correction" | "report";
+
+export interface FeedbackStatusDto {
+  id: string;
+  kind: FeedbackKind;
+  status: SubmissionStatus | CorrectionStatus | ReportStatus;
+  createdAt: string;
+  updatedAt: string;
+  priority?: number;
+  priorityLabel?: "urgent" | "normal";
 }
 
 export interface Paginated<T> {

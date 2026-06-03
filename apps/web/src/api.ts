@@ -15,7 +15,14 @@ import type {
   ReportStatus,
   SubmissionStatus,
   CorrectionStatus,
-  EditorialStatus
+  EditorialStatus,
+  SearchResultDto,
+  EventFacetsDto,
+  FeedbackStatusDto,
+  SourceType,
+  ReliabilityLevel,
+  ContentKind,
+  AvailabilityStatus
 } from "@memory-archive/shared";
 import {
   mockClaims,
@@ -30,6 +37,7 @@ import { normalizeApiBase } from "./normalize-api-base.js";
 
 const apiBase = normalizeApiBase(import.meta.env.VITE_API_URL);
 const allowMockFallback = import.meta.env.DEV;
+let csrfToken: string | undefined;
 
 export class ApiRequestError extends Error {
   status: number;
@@ -54,6 +62,13 @@ type EventQuery = {
   sort?: "newest" | "oldest" | "updated" | "sourceCount";
 };
 
+type SearchQuery = {
+  q: string;
+  page?: number;
+  pageSize?: number;
+  type?: SearchResultDto["type"];
+};
+
 export type PublicSubmitKind = "submission" | "correction" | "report";
 
 export type SubmitReceipt = {
@@ -62,6 +77,8 @@ export type SubmitReceipt = {
 };
 
 export type AdminEventDto = EventListItemDto;
+
+export type AdminSourceDto = SourceDto;
 
 export type AdminReportDto = {
   id: string;
@@ -149,11 +166,14 @@ function queryString(params: Record<string, string | number | undefined>) {
 }
 
 async function requestJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? "GET").toUpperCase();
+  const needsCsrf = ["POST", "PUT", "PATCH", "DELETE"].includes(method) && path.startsWith("/admin/");
   const response = await fetch(`${apiBase}${path}`, {
     credentials: "include",
     ...init,
     headers: {
       ...(init?.body ? { "Content-Type": "application/json" } : {}),
+      ...(needsCsrf && csrfToken ? { "X-CSRF-Token": csrfToken } : {}),
       ...init?.headers
     }
   });
@@ -216,6 +236,25 @@ export async function fetchEvents(params: EventQuery = {}): Promise<EventListIte
   return data.items;
 }
 
+export async function fetchEventFacets() {
+  return getJson<EventFacetsDto>("/api/events/facets");
+}
+
+export async function searchArchive(params: SearchQuery) {
+  return getJson<Paginated<SearchResultDto>>(
+    `/api/search${queryString({
+      q: params.q,
+      page: params.page ?? 1,
+      pageSize: params.pageSize ?? 12,
+      type: params.type
+    })}`
+  );
+}
+
+export async function fetchFeedbackStatus(id: string) {
+  return getJson<FeedbackStatusDto>(`/api/feedback/${encodeURIComponent(id)}`);
+}
+
 export async function fetchAdminEvents(params: EventQuery & { editorialStatus?: EditorialStatus | "" } = {}) {
   return getJson<Paginated<AdminEventDto>>(
     `/admin/events${queryString({
@@ -230,6 +269,81 @@ export async function fetchAdminEvents(params: EventQuery & { editorialStatus?: 
       sort: params.sort ?? "updated"
     })}`
   );
+}
+
+export async function createAdminEvent(input: {
+  slug: string;
+  title: string;
+  neutralTitle: string;
+  summary: string;
+  eventProcessStatus?: EventProcessStatus;
+  occurredAt?: string;
+  whatWeKnow?: string[];
+  whatIsDisputed?: string[];
+  whatNotToInfer?: string[];
+  latestUpdates?: string[];
+}) {
+  return requestJson<AdminEventDto>("/admin/events", {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function updateAdminEvent(eventId: string, input: Partial<{
+  title: string;
+  neutralTitle: string;
+  summary: string;
+  eventProcessStatus: EventProcessStatus;
+  occurredAt: string;
+  whatWeKnow: string[];
+  whatIsDisputed: string[];
+  whatNotToInfer: string[];
+  latestUpdates: string[];
+}>) {
+  return requestJson<AdminEventDto>(`/admin/events/${eventId}`, {
+    method: "PATCH",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function fetchAdminSources(eventId: string) {
+  return getJson<{ items: AdminSourceDto[] }>(`/admin/events/${eventId}/sources`);
+}
+
+export async function createAdminSource(eventId: string, input: {
+  title: string;
+  url?: string;
+  sourceType: SourceType;
+  reliabilityLevel: ReliabilityLevel;
+  publisher?: string;
+  authorDisplay?: string;
+  publishedAt?: string;
+  summary: string;
+}) {
+  return requestJson<AdminSourceDto>(`/admin/events/${eventId}/sources`, {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function createAdminPlatformLink(eventId: string, input: {
+  sourceId?: string;
+  platform: Platform;
+  contentKind: ContentKind;
+  originalUrl: string;
+  canonicalUrl?: string;
+  title: string;
+  description: string;
+  authorDisplay?: string;
+  thumbnailUrl?: string;
+  publishedAt?: string;
+  availabilityStatus?: AvailabilityStatus;
+  archiveUrl?: string;
+}) {
+  return requestJson<PlatformLinkDto>(`/admin/events/${eventId}/platform-links`, {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
 }
 
 export async function publishAdminEvent(eventId: string) {
@@ -384,8 +498,11 @@ export async function fetchVersions(slug: string): Promise<RevisionDto[]> {
 
 export async function fetchSession(): Promise<SessionDto> {
   try {
-    return await getJson<SessionDto>("/api/session");
+    const session = await getJson<SessionDto>("/api/session");
+    csrfToken = session.role === "ADMIN" ? session.csrfToken : undefined;
+    return session;
   } catch {
+    csrfToken = undefined;
     return { role: "GUEST" };
   }
 }
@@ -401,7 +518,9 @@ export async function loginAdmin(passcode: string): Promise<SessionDto> {
     const errorData = await response.json().catch(() => ({}));
     throw new Error(errorData.error || "Login failed");
   }
-  return response.json() as Promise<SessionDto>;
+  const session = (await response.json()) as SessionDto;
+  csrfToken = session.role === "ADMIN" ? session.csrfToken : undefined;
+  return session;
 }
 
 export async function logoutAdmin(): Promise<SessionDto> {
@@ -412,5 +531,6 @@ export async function logoutAdmin(): Promise<SessionDto> {
   if (!response.ok) {
     throw new Error("Logout failed");
   }
+  csrfToken = undefined;
   return response.json() as Promise<SessionDto>;
 }

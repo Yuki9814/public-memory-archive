@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { prisma, type SourcePlatformLink } from "@memory-archive/db";
 import { getStorageLocalDir } from "./storage-config.js";
 import { isConfiguredWaybackEnabled } from "./wayback-config.js";
+import { readLimitedText, safeFetch } from "./capture-safety.js";
 
 type CaptureTarget = {
   sourceId: string;
@@ -32,7 +33,7 @@ async function saveHtmlSnapshot(captureId: string, html: string) {
 async function maybeSaveWayback(url: string) {
   if (!isConfiguredWaybackEnabled()) return null;
   const endpoint = `https://web.archive.org/save/${encodeURIComponent(url)}`;
-  const response = await fetch(endpoint, { method: "GET" });
+  const response = await safeFetch(endpoint, { method: "GET" });
   if (!response.ok) return null;
   return response.url;
 }
@@ -49,13 +50,12 @@ async function captureOne(target: CaptureTarget, taskId: string) {
   });
 
   try {
-    const response = await fetch(target.url, {
-      redirect: "follow",
+    const response = await safeFetch(target.url, {
       headers: {
         "user-agent": "PublicMemoryArchiveBot/0.1 (+https://example.org/archive-bot)"
       }
     });
-    const body = await response.text();
+    const body = await readLimitedText(response);
     const contentHash = sha256(body);
     const htmlSnapshotUrl = await saveHtmlSnapshot(capture.id, body);
     const waybackUrl = await maybeSaveWayback(target.url);

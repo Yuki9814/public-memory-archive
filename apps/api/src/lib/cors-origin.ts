@@ -15,9 +15,18 @@ export function isOriginAllowed(origin: string | undefined | null): boolean {
     return true;
   }
 
-  const configured = getConfiguredCorsOrigin();
+  let configured: string;
+  try {
+    configured = getConfiguredCorsOrigin();
+  } catch {
+    return false;
+  }
   if (origin === configured) {
     return true;
+  }
+
+  if (process.env.NODE_ENV === "production") {
+    return false;
   }
 
   return isLocalhostOrigin(origin) && isLocalhostOrigin(configured);

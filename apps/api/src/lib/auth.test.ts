@@ -44,6 +44,21 @@ function decodeAdminPayload(token: string) {
   return JSON.parse(Buffer.from(encodedPayload, "base64url").toString("utf8")) as { displayName: string };
 }
 
+function assertAdminSessionBody(
+  body: unknown,
+  expected: { displayName: string; userId?: string }
+): asserts body is { role: "ADMIN"; displayName: string; userId?: string; csrfToken: string } {
+  assert.equal(typeof body, "object");
+  assert.notEqual(body, null);
+  const session = body as { role?: unknown; displayName?: unknown; userId?: unknown; csrfToken?: unknown };
+  assert.equal(session.role, "ADMIN");
+  assert.equal(session.displayName, expected.displayName);
+  assert.equal(session.userId, expected.userId);
+  const csrfToken = session.csrfToken;
+  if (typeof csrfToken !== "string") assert.fail("csrfToken must be a string");
+  assert.ok(csrfToken.length >= 32);
+}
+
 test("session defaults to guest and blocks admin routes", async () => {
   process.env.ADMIN_PASSCODE = "test-passcode";
   process.env.ADMIN_SESSION_SECRET = "test-session-secret";
@@ -83,7 +98,7 @@ test("admin passcode creates a signed session cookie", async () => {
     payload: { passcode: "test-passcode" }
   });
   assert.equal(login.statusCode, 200);
-  assert.deepEqual(login.json(), { role: "ADMIN", displayName: "馆长" });
+  assertAdminSessionBody(login.json(), { displayName: "馆长" });
 
   const setCookie = login.headers["set-cookie"];
   assert.equal(typeof setCookie, "string");
@@ -95,7 +110,54 @@ test("admin passcode creates a signed session cookie", async () => {
     headers: { cookie: (setCookie as string).split(";")[0] }
   });
   assert.equal(session.statusCode, 200);
-  assert.deepEqual(session.json(), { role: "ADMIN", displayName: "馆长" });
+  assertAdminSessionBody(session.json(), { displayName: "馆长" });
+  await app.close();
+});
+
+test("admin unsafe routes require a matching CSRF token", async () => {
+  process.env.ADMIN_PASSCODE = "test-passcode";
+  process.env.ADMIN_SESSION_SECRET = "test-session-secret";
+  process.env.ADMIN_DISPLAY_NAME = "馆长";
+  delete process.env.ADMIN_USER_ID;
+
+  const app = await buildApp();
+  const login = await app.inject({
+    method: "POST",
+    url: "/api/auth/admin-login",
+    headers: { "content-type": "application/json" },
+    payload: { passcode: "test-passcode" }
+  });
+  assert.equal(login.statusCode, 200);
+  const body = login.json();
+  assertAdminSessionBody(body, { displayName: "馆长" });
+  const cookie = String(login.headers["set-cookie"]).split(";")[0];
+
+  const missing = await app.inject({
+    method: "POST",
+    url: "/admin/events",
+    headers: { cookie, "content-type": "application/json" },
+    payload: {}
+  });
+  assert.equal(missing.statusCode, 403);
+  assert.equal(missing.json().error, "CSRF_TOKEN_REQUIRED");
+
+  const invalid = await app.inject({
+    method: "POST",
+    url: "/admin/events",
+    headers: { cookie, "content-type": "application/json", "x-csrf-token": "wrong" },
+    payload: {}
+  });
+  assert.equal(invalid.statusCode, 403);
+  assert.equal(invalid.json().error, "CSRF_TOKEN_REQUIRED");
+
+  const valid = await app.inject({
+    method: "POST",
+    url: "/admin/events",
+    headers: { cookie, "content-type": "application/json", "x-csrf-token": body.csrfToken },
+    payload: {}
+  });
+  assert.notEqual(valid.statusCode, 403);
+  assert.equal(valid.statusCode, 400);
   await app.close();
 });
 
@@ -281,7 +343,7 @@ test("admin login response and session use normalized display name and user id",
       });
 
       assert.equal(login.statusCode, 200);
-      assert.deepEqual(login.json(), { role: "ADMIN", displayName: "馆长" });
+      assertAdminSessionBody(login.json(), { displayName: "馆长" });
 
       const setCookie = login.headers["set-cookie"] as string;
       const session = await app.inject({
@@ -291,7 +353,7 @@ test("admin login response and session use normalized display name and user id",
       });
 
       assert.equal(session.statusCode, 200);
-      assert.deepEqual(session.json(), { role: "ADMIN", displayName: "馆长" });
+      assertAdminSessionBody(session.json(), { displayName: "馆长" });
       await app.close();
     }
 
@@ -306,7 +368,7 @@ test("admin login response and session use normalized display name and user id",
     });
 
     assert.equal(login.statusCode, 200);
-    assert.deepEqual(login.json(), { role: "ADMIN", displayName: "馆长", userId: "  curator-42  " });
+    assertAdminSessionBody(login.json(), { displayName: "馆长", userId: "  curator-42  " });
 
     const setCookie = login.headers["set-cookie"] as string;
     const session = await app.inject({
@@ -316,7 +378,7 @@ test("admin login response and session use normalized display name and user id",
     });
 
     assert.equal(session.statusCode, 200);
-    assert.deepEqual(session.json(), { role: "ADMIN", displayName: "馆长", userId: "  curator-42  " });
+    assertAdminSessionBody(session.json(), { displayName: "馆长", userId: "  curator-42  " });
     await app.close();
   } finally {
     restoreAdminEnv(saved);

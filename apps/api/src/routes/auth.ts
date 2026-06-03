@@ -4,11 +4,14 @@ import {
   adminDisplayName,
   adminUserId,
   createAdminSession,
+  csrfTokenFromSessionToken,
   getAdminSession,
+  revokeAdminSession,
   serializeAdminSessionCookie,
   serializeClearAdminSessionCookie,
   validateAdminPasscode
 } from "../lib/auth.js";
+import { clientKey, consumeBucket, rejectIfLimited } from "../lib/abuse.js";
 
 const adminLoginSchema = z.object({
   passcode: z.string().min(1).max(256)
@@ -20,6 +23,7 @@ export async function registerAuthRoutes(app: FastifyInstance) {
   });
 
   app.post("/api/auth/admin-login", { schema: { tags: ["public"] } }, async (request, reply) => {
+    if (rejectIfLimited(reply, consumeBucket(clientKey(request, "admin-login"), 8, 5 * 60 * 1000))) return;
     const body = adminLoginSchema.parse(request.body);
     const result = validateAdminPasscode(body.passcode);
     if (result.reason === "not_configured") {
@@ -31,15 +35,19 @@ export async function registerAuthRoutes(app: FastifyInstance) {
 
     const userId = adminUserId();
     const token = createAdminSession(userId);
+    const csrfToken = csrfTokenFromSessionToken(token);
+    if (!csrfToken) return reply.code(500).send({ error: "ADMIN_CSRF_UNAVAILABLE" });
     reply.header("Set-Cookie", serializeAdminSessionCookie(token));
     return {
       role: "ADMIN",
       displayName: adminDisplayName(),
+      csrfToken,
       ...(userId ? { userId } : {})
     };
   });
 
   app.post("/api/auth/logout", { schema: { tags: ["public"] } }, async (_request, reply) => {
+    revokeAdminSession(_request);
     reply.header("Set-Cookie", serializeClearAdminSessionCookie());
     return { role: "GUEST" };
   });

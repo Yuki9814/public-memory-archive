@@ -11,6 +11,7 @@ import type {
   TimelineEntry,
   Claim,
   ClaimEvidenceLink,
+  EvidenceItem,
   Actor,
   EventActor,
   EventVersion
@@ -22,6 +23,7 @@ export type PreflightEvent = Event & {
   sources?: (Source & { platformLinks?: SourcePlatformLink[] })[];
   timelineEntries?: TimelineEntry[];
   claims?: (Claim & { evidenceLinks?: ClaimEvidenceLink[] })[];
+  evidenceItems?: EvidenceItem[];
   eventActors?: (EventActor & { actor?: Actor | null })[];
   eventVersions?: EventVersion[];
 };
@@ -140,8 +142,30 @@ function checkSensitiveInfo(event: PreflightEvent, failed: FailedCheck[]) {
     textOf(event.whatWeKnow),
     textOf(event.whatIsDisputed),
     textOf(event.whatNotToInfer),
+    ...(event.sources ?? []).flatMap((source) => [
+      source.title,
+      source.url,
+      source.publisher,
+      source.authorDisplay,
+      source.summary,
+      ...(source.platformLinks ?? []).flatMap((link) => [
+        link.title,
+        link.description,
+        link.authorDisplay,
+        link.originalUrl,
+        link.canonicalUrl,
+        link.thumbnailUrl,
+        link.archiveUrl
+      ])
+    ]),
     ...(event.timelineEntries ?? []).flatMap((entry) => [entry.title, entry.body]),
-    ...(event.claims ?? []).flatMap((claim) => [claim.title, claim.statement])
+    ...(event.claims ?? []).flatMap((claim) => [claim.title, claim.statement]),
+    ...(event.evidenceItems ?? []).flatMap((evidence) => [
+      evidence.title,
+      evidence.description,
+      evidence.storageUrl,
+      evidence.externalUrl
+    ])
   ]
     .filter(Boolean)
     .join("\n");

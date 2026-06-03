@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Archive,
@@ -37,28 +37,40 @@ import type {
   RevisionDto,
   SourceDto,
   TimelineEntryDto,
-  SessionDto
+  SessionDto,
+  EventFacetsDto,
+  SearchResultDto,
+  SourceType,
+  ReliabilityLevel,
+  ContentKind,
+  AvailabilityStatus
 } from "@memory-archive/shared";
 import { getEventProcessStatusLabel, getReliabilityLabel } from "@memory-archive/shared";
 import {
+  captureSource,
+  createAdminEvent,
+  createAdminPlatformLink,
+  createAdminSource,
+  createCorrection,
+  createReport,
+  createSubmission,
   fetchClaims,
   fetchAdminCorrections,
   fetchAdminEvents,
   fetchAdminReports,
+  fetchAdminSources,
   fetchAdminSubmissions,
   fetchAdminTask,
   fetchEventDetail,
+  fetchEventFacets,
   fetchEventPage,
   fetchEvents,
+  fetchFeedbackStatus,
   fetchPlatformLinks,
   fetchSession,
   fetchSources,
   fetchTimeline,
   fetchVersions,
-  captureSource,
-  createCorrection,
-  createReport,
-  createSubmission,
   failedChecksFromError,
   isDevMockFallbackEnabled,
   loginAdmin,
@@ -67,22 +79,24 @@ import {
   resolveAdminCorrection,
   resolveAdminReport,
   resolveAdminSubmission,
+  searchArchive,
+  updateAdminEvent,
   type AdminCorrectionDto,
   type AdminEventDto,
   type AdminReportDto,
+  type AdminSourceDto,
   type AdminSubmissionDto,
   type AdminTaskDto,
   type SubmitReceipt
 } from "./api.js";
 import { formatDate, getTimeSafe } from "./format-date.js";
-import { mockCandidates } from "./mock.js";
 
 // Client-side simple routing
 type Route =
   | { name: "home" }
-  | { name: "events"; initialTopic?: string }
+  | { name: "events"; params: URLSearchParams }
   | { name: "event"; slug: string }
-  | { name: "search" }
+  | { name: "search"; params: URLSearchParams }
   | { name: "topics" }
   | { name: "sources" }
   | { name: "methodology" }
@@ -95,12 +109,11 @@ type Route =
 function parseRoute(): Route {
   const path = window.location.pathname.replace(/\/$/, "") || "/";
   const params = new URLSearchParams(window.location.search);
-  const topicParam = params.get("topic") || undefined;
   
   if (path === "/") return { name: "home" };
-  if (path === "/events") return { name: "events", initialTopic: topicParam };
+  if (path === "/events") return { name: "events", params };
   if (path.startsWith("/events/")) return { name: "event", slug: decodeURIComponent(path.split("/")[2] ?? "") };
-  if (path === "/search") return { name: "search" };
+  if (path === "/search") return { name: "search", params };
   if (path === "/topics") return { name: "topics" };
   if (path === "/sources") return { name: "sources" };
   if (path === "/methodology") return { name: "methodology" };
@@ -136,6 +149,16 @@ function platformLabel(value: string) {
     OTHER: "其他"
   };
   return labels[value] ?? value;
+}
+
+function searchResultTypeLabel(value: SearchResultDto["type"]) {
+  const labels: Record<SearchResultDto["type"], string> = {
+    event: "事件",
+    source: "来源",
+    claim: "主张",
+    revision: "修订"
+  };
+  return labels[value];
 }
 
 function relationLabel(value: string) {
@@ -370,8 +393,21 @@ function DevFallbackNotice() {
 
 function EventCard({ event }: { event: EventListItemDto }) {
   const hasCover = !!event.coverImage?.url;
+  const openEvent = () => navigate(`/events/${event.slug}`);
   return (
-    <article className="event-card animate-fade" onClick={() => navigate(`/events/${event.slug}`)}>
+    <article
+      className="event-card animate-fade"
+      role="link"
+      tabIndex={0}
+      onClick={openEvent}
+      onKeyDown={(eventKey) => {
+        if (eventKey.key === "Enter" || eventKey.key === " ") {
+          eventKey.preventDefault();
+          openEvent();
+        }
+      }}
+      aria-label={`查看档案：${event.neutralTitle}`}
+    >
       <div className="card-cover-container" style={{ width: "100%", height: "160px", overflow: "hidden", borderBottom: "1px solid var(--border-color)", backgroundColor: "var(--bg-stamp)", position: "relative" }}>
         {hasCover ? (
           <div className="card-cover-wrapper" style={{ width: "100%", height: "100%" }}>
@@ -873,7 +909,7 @@ function RevisionHistory({ versions }: { versions: RevisionDto[] }) {
 }
 
 // 13 & 14. CTASection
-function CTASection({ type, eventId }: { type: "correction" | "report"; eventId?: string }) {
+function CTASection({ type, eventId, enabled = true }: { type: "correction" | "report"; eventId?: string; enabled?: boolean }) {
   const isCorrection = type === "correction";
   const path = `${isCorrection ? "/corrections" : "/reports"}${eventId ? `?eventId=${encodeURIComponent(eventId)}` : ""}`;
   return (
@@ -883,14 +919,37 @@ function CTASection({ type, eventId }: { type: "correction" | "report"; eventId?
         <h2>{isCorrection ? "提出纠错" : "紧急举报"}</h2>
       </div>
       <p>
-        {isCorrection
-          ? "我们秉持中立客观的态度。若您发现本档案中存在事实性硬伤、失效的来源链接，或不准确的陈述，欢迎提交详实的佐证资料，协助编辑部进行滚动修订。"
-          : "若您发现本档案中包含可能泄露个人隐私（如身份证号、手机、住址等）、人肉爆料、诽谤言论或涉及未成年人等高敏感违法内容，请立即通过紧急通道进行申诉。"}
+        {!enabled
+          ? "该入口当前已根据档案状态临时关闭，编辑部会继续保留内部复核记录。"
+          : isCorrection
+            ? "我们秉持中立客观的态度。若您发现本档案中存在事实性硬伤、失效的来源链接，或不准确的陈述，欢迎提交详实的佐证资料，协助编辑部进行滚动修订。"
+            : "若您发现本档案中包含可能泄露个人隐私（如身份证号、手机、住址等）、人肉爆料、诽谤言论或涉及未成年人等高敏感违法内容，请立即通过紧急通道进行申诉。"}
       </p>
-      <button onClick={() => navigate(path)}>
+      <button onClick={() => navigate(path)} disabled={!enabled}>
         {isCorrection ? "提交事实纠错说明" : "发起紧急删除/撤稿举报"}
       </button>
     </article>
+  );
+}
+
+function DetailActionBar({ event }: { event: EventDetailDto }) {
+  const correctionPath = `/corrections?eventId=${encodeURIComponent(event.id)}&eventTitle=${encodeURIComponent(event.neutralTitle)}`;
+  const reportPath = `/reports?eventId=${encodeURIComponent(event.id)}&eventTitle=${encodeURIComponent(event.neutralTitle)}`;
+  return (
+    <nav className="detail-action-bar" aria-label="档案反馈操作">
+      <button disabled={!event.correctionEnabled} onClick={() => navigate(correctionPath)}>
+        <CheckCircle2 size={16} />
+        纠错
+      </button>
+      <button disabled={!event.reportEnabled} onClick={() => navigate(reportPath)}>
+        <Flag size={16} />
+        举报
+      </button>
+      <a href={`/api/events/${event.slug}/feed.xml`} target="_blank" rel="noopener noreferrer">
+        <History size={16} />
+        订阅修订
+      </a>
+    </nav>
   );
 }
 
@@ -939,6 +998,7 @@ function EventDetailPage({ slug }: { slug: string }) {
     <main className="detail-shell">
       {/* 1. EventHeader */}
       <EventHeader event={event} />
+      <DetailActionBar event={event} />
       
       <div className="detail-layout">
         <div className="detail-main">
@@ -997,9 +1057,9 @@ function EventDetailPage({ slug }: { slug: string }) {
           
           <div className="cta-row">
             {/* 13. CorrectionCTA */}
-            <CTASection type="correction" eventId={event.id} />
+            <CTASection type="correction" eventId={event.id} enabled={event.correctionEnabled} />
             {/* 14. ReportCTA */}
-            <CTASection type="report" eventId={event.id} />
+            <CTASection type="report" eventId={event.id} enabled={event.reportEnabled} />
           </div>
         </div>
         
@@ -1067,6 +1127,12 @@ function PublicFeedbackForm({ kind }: { kind: "submit" | "correction" | "report"
   const [submitting, setSubmitting] = useState(false);
   const [receipt, setReceipt] = useState<SubmitReceipt | null>(null);
   const [error, setError] = useState("");
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  const [feedbackStatus, setFeedbackStatus] = useState("");
+  const params = new URLSearchParams(window.location.search);
+  const eventTitle = params.get("eventTitle") || "";
+  const sourceTitle = params.get("sourceTitle") || "";
+  const platformTitle = params.get("platformTitle") || "";
 
   const copy = {
     submit: ["提交线索", "例如：某平台公开材料、公告页面链接", "线索已受理"],
@@ -1076,12 +1142,23 @@ function PublicFeedbackForm({ kind }: { kind: "submit" | "correction" | "report"
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!title || !description) {
-      alert("请填写关键的标题与说明信息！");
+    const nextErrors: Record<string, string> = {};
+    if (!title.trim()) nextErrors.title = "请填写标题。";
+    if (!description.trim()) nextErrors.description = "请填写详细说明。";
+    if (url.trim()) {
+      try {
+        const parsed = new URL(url.trim());
+        if (parsed.protocol !== "http:" && parsed.protocol !== "https:") nextErrors.url = "链接必须使用 http 或 https。";
+      } catch {
+        nextErrors.url = "请输入有效链接。";
+      }
+    }
+    if (Object.keys(nextErrors).length > 0) {
+      setFieldErrors(nextErrors);
       return;
     }
+    setFieldErrors({});
 
-    const params = new URLSearchParams(window.location.search);
     const eventId = params.get("eventId") || undefined;
     const sourceId = params.get("sourceId") || undefined;
     const platformLinkId = params.get("platformLinkId") || undefined;
@@ -1107,7 +1184,7 @@ function PublicFeedbackForm({ kind }: { kind: "submit" | "correction" | "report"
                 sourceId,
                 email: cleanEmail,
                 title,
-                body: `${description}${urlNote}`
+                body: `${description.trim()}${urlNote}`
               })
             : await createReport({
                 eventId,
@@ -1115,7 +1192,7 @@ function PublicFeedbackForm({ kind }: { kind: "submit" | "correction" | "report"
                 platformLinkId,
                 reportType,
                 reporterEmail: cleanEmail,
-                body: `${description}${urlNote}`
+                body: `举报标题：${title.trim()}\n\n${description.trim()}${urlNote}`
               });
       setReceipt(result);
     } catch (err) {
@@ -1154,23 +1231,41 @@ function PublicFeedbackForm({ kind }: { kind: "submit" | "correction" | "report"
             <strong>{title}</strong>
           </div>
         </div>
+        {feedbackStatus && <p className="feedback-status-line">{feedbackStatus}</p>}
 
-        <button onClick={() => {
-          setReceipt(null);
-          setTitle("");
-          setDescription("");
-          setUrl("");
-          setEmail("");
-          setError("");
-        }}>
-          继续提交
-        </button>
+        <div className="form-success-actions">
+          <button onClick={async () => {
+            const status = await fetchFeedbackStatus(receipt.id);
+            setFeedbackStatus(`当前公开处理状态：${queueStatusLabel(status.status)}${status.priorityLabel === "urgent" ? "，高优先级安全复核" : ""}`);
+          }}>
+            查询处理状态
+          </button>
+          <button onClick={() => {
+            setReceipt(null);
+            setTitle("");
+            setDescription("");
+            setUrl("");
+            setEmail("");
+            setError("");
+            setFeedbackStatus("");
+          }}>
+            继续提交
+          </button>
+        </div>
       </div>
     );
   }
 
   return (
     <form className="archive-form" onSubmit={handleSubmit}>
+      {(eventTitle || sourceTitle || platformTitle) && (
+        <div className="feedback-context">
+          <strong>关联对象</strong>
+          {eventTitle && <span>卷宗：{eventTitle}</span>}
+          {sourceTitle && <span>来源：{sourceTitle}</span>}
+          {platformTitle && <span>外链：{platformTitle}</span>}
+        </div>
+      )}
       <label>
         内容摘要/标题
         <input
@@ -1179,6 +1274,7 @@ function PublicFeedbackForm({ kind }: { kind: "submit" | "correction" | "report"
           onChange={(e) => setTitle(e.target.value)}
           placeholder={`请输入简要的${copy[0]}标题`}
         />
+        {fieldErrors.title && <span className="field-error">{fieldErrors.title}</span>}
       </label>
 
       <label>
@@ -1214,6 +1310,7 @@ function PublicFeedbackForm({ kind }: { kind: "submit" | "correction" | "report"
           onChange={(e) => setDescription(e.target.value)}
           placeholder="请说明具体的争议点与佐证细节，确保逻辑严密、不带情绪性修辞"
         />
+        {fieldErrors.description && <span className="field-error">{fieldErrors.description}</span>}
       </label>
 
       <label>
@@ -1224,6 +1321,7 @@ function PublicFeedbackForm({ kind }: { kind: "submit" | "correction" | "report"
           onChange={(e) => setUrl(e.target.value)}
           placeholder="https://example.com/source-link"
         />
+        {fieldErrors.url && <span className="field-error">{fieldErrors.url}</span>}
       </label>
 
       {error && <div className="form-error-box">{error}</div>}
@@ -1254,19 +1352,66 @@ function AdminPage({ section }: { section: string }) {
   const [failedChecks, setFailedChecks] = useState<Record<string, FailedCheck[]>>({});
   const [reportNotes, setReportNotes] = useState<Record<string, string>>({});
   const [sourceIdInput, setSourceIdInput] = useState("");
+  const [selectedAdminEventId, setSelectedAdminEventId] = useState("");
+  const [adminSources, setAdminSources] = useState<AdminSourceDto[]>([]);
   const [captureResult, setCaptureResult] = useState<{ taskId: string; queued: boolean } | null>(null);
   const [taskLookupId, setTaskLookupId] = useState("");
   const [taskDetail, setTaskDetail] = useState<AdminTaskDto | null>(null);
+  const [eventForm, setEventForm] = useState({
+    id: "",
+    slug: "",
+    title: "",
+    neutralTitle: "",
+    summary: "",
+    eventProcessStatus: "UNVERIFIED",
+    occurredAt: "",
+    whatWeKnow: "",
+    whatIsDisputed: "",
+    whatNotToInfer: "",
+    latestUpdates: ""
+  });
+  const [sourceForm, setSourceForm] = useState({
+    eventId: "",
+    title: "",
+    url: "",
+    sourceType: "OTHER",
+    reliabilityLevel: "UNKNOWN",
+    publisher: "",
+    authorDisplay: "",
+    publishedAt: "",
+    summary: ""
+  });
+  const [platformLinkForm, setPlatformLinkForm] = useState({
+    eventId: "",
+    sourceId: "",
+    platform: "OTHER",
+    contentKind: "POST",
+    originalUrl: "",
+    canonicalUrl: "",
+    title: "",
+    description: "",
+    authorDisplay: "",
+    thumbnailUrl: "",
+    publishedAt: "",
+    availabilityStatus: "UNKNOWN",
+    archiveUrl: ""
+  });
 
-  const loadAdminData = async () => {
+  const splitLines = (value: string) => value.split("\n").map((line) => line.trim()).filter(Boolean);
+  const cleanOptional = (value: string) => value.trim() || undefined;
+
+	  const loadAdminData = async () => {
     setAdminLoading(true);
     setAdminError("");
     setAdminMessage("");
     try {
-      if (section === "events") {
-        const data = await fetchAdminEvents({ pageSize: 50 });
-        setAdminEvents(data.items);
-      } else if (section === "reports") {
+	      if (section === "events" || section === "sources" || section === "platform-links") {
+	        const data = await fetchAdminEvents({ pageSize: 50 });
+	        setAdminEvents(data.items);
+          if (!selectedAdminEventId && data.items[0]) {
+            setSelectedAdminEventId(data.items[0].id);
+          }
+	      } else if (section === "reports") {
         setReports(await fetchAdminReports());
       } else if (section === "review") {
         const [submissionData, correctionData] = await Promise.all([
@@ -1283,9 +1428,16 @@ function AdminPage({ section }: { section: string }) {
     }
   };
 
+	  useEffect(() => {
+	    void loadAdminData();
+	  }, [section]);
+
   useEffect(() => {
-    void loadAdminData();
-  }, [section]);
+    if (!selectedAdminEventId) return;
+    fetchAdminSources(selectedAdminEventId)
+      .then((data) => setAdminSources(data.items))
+      .catch(() => setAdminSources([]));
+  }, [selectedAdminEventId]);
 
   const handlePublish = async (event: AdminEventDto) => {
     setPublishingId(event.id);
@@ -1360,7 +1512,7 @@ function AdminPage({ section }: { section: string }) {
     }
   };
 
-  const handleTaskLookup = async () => {
+	  const handleTaskLookup = async () => {
     const taskId = taskLookupId.trim();
     if (!taskId) {
       setAdminError("请先填写 taskId。");
@@ -1371,6 +1523,109 @@ function AdminPage({ section }: { section: string }) {
       setTaskDetail(await fetchAdminTask(taskId));
     } catch (err) {
       setAdminError(err instanceof Error ? err.message : "任务查询失败");
+    }
+	  };
+
+  const handleSaveEvent = async () => {
+    setAdminError("");
+    const payload = {
+      slug: eventForm.slug.trim(),
+      title: eventForm.title.trim(),
+      neutralTitle: eventForm.neutralTitle.trim(),
+      summary: eventForm.summary.trim(),
+      eventProcessStatus: eventForm.eventProcessStatus as EventDetailDto["eventProcessStatus"],
+      occurredAt: cleanOptional(eventForm.occurredAt),
+      whatWeKnow: splitLines(eventForm.whatWeKnow),
+      whatIsDisputed: splitLines(eventForm.whatIsDisputed),
+      whatNotToInfer: splitLines(eventForm.whatNotToInfer),
+      latestUpdates: splitLines(eventForm.latestUpdates)
+    };
+    try {
+      if (eventForm.id) {
+        await updateAdminEvent(eventForm.id, payload);
+        setAdminMessage("事件草稿已更新。");
+      } else {
+        await createAdminEvent(payload);
+        setAdminMessage("事件草稿已创建。");
+      }
+      setEventForm((prev) => ({ ...prev, id: "" }));
+      await loadAdminData();
+    } catch (err) {
+      setAdminError(err instanceof Error ? err.message : "事件保存失败");
+    }
+  };
+
+  const handleLoadEventIntoForm = (event: AdminEventDto) => {
+    setEventForm({
+      id: event.id,
+      slug: event.slug,
+      title: event.title,
+      neutralTitle: event.neutralTitle,
+      summary: event.summary,
+      eventProcessStatus: event.eventProcessStatus,
+      occurredAt: "",
+      whatWeKnow: "",
+      whatIsDisputed: "",
+      whatNotToInfer: "",
+      latestUpdates: ""
+    });
+    setSelectedAdminEventId(event.id);
+  };
+
+  const handleCreateSource = async () => {
+    const eventId = sourceForm.eventId || selectedAdminEventId;
+    if (!eventId) {
+      setAdminError("请先选择事件。");
+      return;
+    }
+    setAdminError("");
+    try {
+      await createAdminSource(eventId, {
+        title: sourceForm.title.trim(),
+        url: cleanOptional(sourceForm.url),
+        sourceType: sourceForm.sourceType as SourceType,
+        reliabilityLevel: sourceForm.reliabilityLevel as ReliabilityLevel,
+        publisher: cleanOptional(sourceForm.publisher),
+        authorDisplay: cleanOptional(sourceForm.authorDisplay),
+        publishedAt: cleanOptional(sourceForm.publishedAt),
+        summary: sourceForm.summary.trim()
+      });
+      setAdminMessage("来源已新增。");
+      setSourceForm((prev) => ({ ...prev, title: "", url: "", publisher: "", authorDisplay: "", publishedAt: "", summary: "" }));
+      setSelectedAdminEventId(eventId);
+      setAdminSources((await fetchAdminSources(eventId)).items);
+    } catch (err) {
+      setAdminError(err instanceof Error ? err.message : "来源新增失败");
+    }
+  };
+
+  const handleCreatePlatformLink = async () => {
+    const eventId = platformLinkForm.eventId || selectedAdminEventId;
+    if (!eventId) {
+      setAdminError("请先选择事件。");
+      return;
+    }
+    setAdminError("");
+    try {
+      await createAdminPlatformLink(eventId, {
+        sourceId: cleanOptional(platformLinkForm.sourceId),
+        platform: platformLinkForm.platform as PlatformLinkDto["platform"],
+        contentKind: platformLinkForm.contentKind as ContentKind,
+        originalUrl: platformLinkForm.originalUrl.trim(),
+        canonicalUrl: cleanOptional(platformLinkForm.canonicalUrl),
+        title: platformLinkForm.title.trim(),
+        description: platformLinkForm.description.trim(),
+        authorDisplay: cleanOptional(platformLinkForm.authorDisplay),
+        thumbnailUrl: cleanOptional(platformLinkForm.thumbnailUrl),
+        publishedAt: cleanOptional(platformLinkForm.publishedAt),
+        availabilityStatus: platformLinkForm.availabilityStatus as AvailabilityStatus,
+        archiveUrl: cleanOptional(platformLinkForm.archiveUrl)
+      });
+      setAdminMessage("平台外链已新增。");
+      setPlatformLinkForm((prev) => ({ ...prev, originalUrl: "", canonicalUrl: "", title: "", description: "", authorDisplay: "", thumbnailUrl: "", archiveUrl: "" }));
+      setAdminSources((await fetchAdminSources(eventId)).items);
+    } catch (err) {
+      setAdminError(err instanceof Error ? err.message : "平台外链新增失败");
     }
   };
 
@@ -1397,9 +1652,36 @@ function AdminPage({ section }: { section: string }) {
         {adminMessage && <div className="admin-alert success"><CheckCircle2 size={16} />{adminMessage}</div>}
         {adminLoading && <LoadingState />}
 
-        {!adminLoading && section === "events" && (
-          <div className="admin-list">
-            <h3>事件发布预检 ({adminEvents.length})</h3>
+	        {!adminLoading && section === "events" && (
+	          <div className="admin-list">
+              <div className="admin-tool-card">
+                <h3>{eventForm.id ? "编辑事件草稿" : "创建事件草稿"}</h3>
+                <div className="admin-form-grid">
+                  <label>Slug<input value={eventForm.slug} onChange={(e) => setEventForm((prev) => ({ ...prev, slug: e.target.value }))} placeholder="public-case-slug" /></label>
+                  <label>原始标题<input value={eventForm.title} onChange={(e) => setEventForm((prev) => ({ ...prev, title: e.target.value }))} /></label>
+                  <label>中性标题<input value={eventForm.neutralTitle} onChange={(e) => setEventForm((prev) => ({ ...prev, neutralTitle: e.target.value }))} /></label>
+                  <label>进展状态
+                    <select value={eventForm.eventProcessStatus} onChange={(e) => setEventForm((prev) => ({ ...prev, eventProcessStatus: e.target.value }))}>
+                      <option value="UNVERIFIED">材料收集中</option>
+                      <option value="DEVELOPING">讨论扩散中</option>
+                      <option value="PLATFORM_INTERVENED">平台回应后</option>
+                      <option value="OFFICIAL_INVESTIGATION">机构核验中</option>
+                      <option value="LEGAL_PROCESS">程序推进中</option>
+                      <option value="CONCLUDED">阶段性收束</option>
+                    </select>
+                  </label>
+                  <label>发生时间<input type="datetime-local" value={eventForm.occurredAt} onChange={(e) => setEventForm((prev) => ({ ...prev, occurredAt: e.target.value }))} /></label>
+                </div>
+                <label>摘要<textarea value={eventForm.summary} onChange={(e) => setEventForm((prev) => ({ ...prev, summary: e.target.value }))} /></label>
+                <div className="admin-form-grid">
+                  <label>已知事实<textarea value={eventForm.whatWeKnow} onChange={(e) => setEventForm((prev) => ({ ...prev, whatWeKnow: e.target.value }))} placeholder="一行一条" /></label>
+                  <label>仍有争议<textarea value={eventForm.whatIsDisputed} onChange={(e) => setEventForm((prev) => ({ ...prev, whatIsDisputed: e.target.value }))} placeholder="一行一条" /></label>
+                  <label>不应推断<textarea value={eventForm.whatNotToInfer} onChange={(e) => setEventForm((prev) => ({ ...prev, whatNotToInfer: e.target.value }))} placeholder="一行一条" /></label>
+                  <label>最近更新<textarea value={eventForm.latestUpdates} onChange={(e) => setEventForm((prev) => ({ ...prev, latestUpdates: e.target.value }))} placeholder="一行一条" /></label>
+                </div>
+                <button onClick={handleSaveEvent}><Check size={14} /> {eventForm.id ? "保存事件" : "创建草稿"}</button>
+              </div>
+	            <h3>事件发布预检 ({adminEvents.length})</h3>
             {adminEvents.length === 0 ? (
               <EmptyState title="暂无事件" body="后台未读取到事件草稿或公开档案。" />
             ) : (
@@ -1415,10 +1697,13 @@ function AdminPage({ section }: { section: string }) {
                       来源 {event.sourceCount} / 时间线 {event.timelineCount} / 平台外链 {event.platformLinkCount}
                     </span>
                   </div>
-                  <div className="admin-item-actions">
-                    <button onClick={() => navigate(`/events/${event.slug}`)}>
-                      <ExternalLink size={14} /> 查看公开页
-                    </button>
+	                  <div className="admin-item-actions">
+                      <button onClick={() => handleLoadEventIntoForm(event)}>
+                        <FileText size={14} /> 编辑
+                      </button>
+	                    <button onClick={() => navigate(`/events/${event.slug}`)} disabled={event.editorialStatus !== "PUBLISHED"}>
+	                      <ExternalLink size={14} /> 查看公开页
+	                    </button>
                     <button className="btn-success" onClick={() => handlePublish(event)} disabled={publishingId === event.id}>
                       <Check size={14} /> {publishingId === event.id ? "预检中" : "运行预检并发布"}
                     </button>
@@ -1443,15 +1728,60 @@ function AdminPage({ section }: { section: string }) {
           </div>
         )}
 
-        {!adminLoading && section === "sources" && (
-          <div className="admin-tool-stack">
-            <div className="admin-tool-card">
-              <h3>创建来源抓取任务</h3>
-              <label>
-                Source ID
-                <input value={sourceIdInput} onChange={(e) => setSourceIdInput(e.target.value)} placeholder="src_xxxxx" />
-              </label>
-              <button onClick={handleCapture}><Archive size={14} /> 触发抓取</button>
+	        {!adminLoading && section === "sources" && (
+	          <div className="admin-tool-stack">
+              <div className="admin-tool-card">
+                <h3>选择事件与新增来源</h3>
+                <label>
+                  事件
+                  <select value={selectedAdminEventId} onChange={(e) => {
+                    setSelectedAdminEventId(e.target.value);
+                    setSourceForm((prev) => ({ ...prev, eventId: e.target.value }));
+                    setPlatformLinkForm((prev) => ({ ...prev, eventId: e.target.value, sourceId: "" }));
+                  }}>
+                    <option value="">请选择事件</option>
+                    {adminEvents.map((event) => <option key={event.id} value={event.id}>{event.neutralTitle}</option>)}
+                  </select>
+                </label>
+                <label>来源标题<input value={sourceForm.title} onChange={(e) => setSourceForm((prev) => ({ ...prev, title: e.target.value }))} /></label>
+                <label>来源 URL<input value={sourceForm.url} onChange={(e) => setSourceForm((prev) => ({ ...prev, url: e.target.value }))} placeholder="https://example.com" /></label>
+                <div className="admin-form-grid">
+                  <label>来源类型
+                    <select value={sourceForm.sourceType} onChange={(e) => setSourceForm((prev) => ({ ...prev, sourceType: e.target.value }))}>
+                      <option value="OFFICIAL_NOTICE">官方说明</option>
+                      <option value="MEDIA_REPORT">媒体报道</option>
+                      <option value="ORIGINAL_POST">原始帖子</option>
+                      <option value="VIDEO">视频</option>
+                      <option value="NOTE">笔记</option>
+                      <option value="OTHER">其他</option>
+                    </select>
+                  </label>
+                  <label>可靠等级
+                    <select value={sourceForm.reliabilityLevel} onChange={(e) => setSourceForm((prev) => ({ ...prev, reliabilityLevel: e.target.value }))}>
+                      <option value="A_STRONG">A 强证据</option>
+                      <option value="B_DIRECT">B 直接材料</option>
+                      <option value="C_INDIRECT">C 间接材料</option>
+                      <option value="D_WEAK">D 弱线索</option>
+                      <option value="UNKNOWN">未定级</option>
+                    </select>
+                  </label>
+                </div>
+                <label>发布者<input value={sourceForm.publisher} onChange={(e) => setSourceForm((prev) => ({ ...prev, publisher: e.target.value }))} /></label>
+                <label>作者展示名<input value={sourceForm.authorDisplay} onChange={(e) => setSourceForm((prev) => ({ ...prev, authorDisplay: e.target.value }))} /></label>
+                <label>发布时间<input type="datetime-local" value={sourceForm.publishedAt} onChange={(e) => setSourceForm((prev) => ({ ...prev, publishedAt: e.target.value }))} /></label>
+                <label>来源摘要<textarea value={sourceForm.summary} onChange={(e) => setSourceForm((prev) => ({ ...prev, summary: e.target.value }))} /></label>
+                <button onClick={handleCreateSource}><Check size={14} /> 新增来源</button>
+              </div>
+	            <div className="admin-tool-card">
+	              <h3>创建来源抓取任务</h3>
+	              <label>
+	                来源
+	                <select value={sourceIdInput} onChange={(e) => setSourceIdInput(e.target.value)}>
+                    <option value="">请选择来源</option>
+                    {adminSources.map((source) => <option key={source.id} value={source.id}>{source.title}</option>)}
+                  </select>
+	              </label>
+	              <button onClick={handleCapture}><Archive size={14} /> 触发抓取</button>
               {captureResult && (
                 <p className="admin-inline-result">
                   taskId: <strong>{captureResult.taskId}</strong>，队列状态：{captureResult.queued ? "已入队" : "未入队"}
@@ -1554,13 +1884,69 @@ function AdminPage({ section }: { section: string }) {
           </div>
         )}
 
-        {!adminLoading && section === "platform-links" && (
-          <div className="state-panel" style={{ borderStyle: "solid", padding: "3rem" }}>
-            <Link2 />
-            <p>平台外链仍由事件来源页写入</p>
-            <span>当前最小闭环优先支持真实举报、发布预检和来源抓取；平台外链新增仍使用 `/admin/events/:id/platform-links` 接口联调。</span>
-          </div>
-        )}
+	        {!adminLoading && section === "platform-links" && (
+            <div className="admin-tool-card">
+              <h3>新增平台外链</h3>
+              <label>
+                事件
+                <select value={selectedAdminEventId} onChange={(e) => {
+                  setSelectedAdminEventId(e.target.value);
+                  setPlatformLinkForm((prev) => ({ ...prev, eventId: e.target.value, sourceId: "" }));
+                }}>
+                  <option value="">请选择事件</option>
+                  {adminEvents.map((event) => <option key={event.id} value={event.id}>{event.neutralTitle}</option>)}
+                </select>
+              </label>
+              <label>
+                绑定来源
+                <select value={platformLinkForm.sourceId} onChange={(e) => setPlatformLinkForm((prev) => ({ ...prev, sourceId: e.target.value }))}>
+                  <option value="">不选择，自动创建来源</option>
+                  {adminSources.map((source) => <option key={source.id} value={source.id}>{source.title}</option>)}
+                </select>
+              </label>
+              <div className="admin-form-grid">
+                <label>平台
+                  <select value={platformLinkForm.platform} onChange={(e) => setPlatformLinkForm((prev) => ({ ...prev, platform: e.target.value }))}>
+                    <option value="BILIBILI">B站</option>
+                    <option value="XIAOHONGSHU">小红书</option>
+                    <option value="WEIBO">微博</option>
+                    <option value="DOUYIN">抖音</option>
+                    <option value="ZHIHU">知乎</option>
+                    <option value="OTHER">其他</option>
+                  </select>
+                </label>
+                <label>内容类型
+                  <select value={platformLinkForm.contentKind} onChange={(e) => setPlatformLinkForm((prev) => ({ ...prev, contentKind: e.target.value }))}>
+                    <option value="VIDEO">视频</option>
+                    <option value="NOTE">笔记</option>
+                    <option value="POST">帖子</option>
+                    <option value="ARTICLE">文章</option>
+                    <option value="COMMENT">评论</option>
+                    <option value="IMAGE">图片</option>
+                    <option value="OTHER">其他</option>
+                  </select>
+                </label>
+                <label>可访问状态
+                  <select value={platformLinkForm.availabilityStatus} onChange={(e) => setPlatformLinkForm((prev) => ({ ...prev, availabilityStatus: e.target.value }))}>
+                    <option value="AVAILABLE">可访问</option>
+                    <option value="DELETED">已删除</option>
+                    <option value="PRIVATE">已私密</option>
+                    <option value="LOGIN_REQUIRED">需登录</option>
+                    <option value="ARCHIVED_ONLY">仅存档</option>
+                    <option value="UNKNOWN">未知</option>
+                  </select>
+                </label>
+              </div>
+              <label>原帖 URL<input value={platformLinkForm.originalUrl} onChange={(e) => setPlatformLinkForm((prev) => ({ ...prev, originalUrl: e.target.value }))} placeholder="https://example.com/post" /></label>
+              <label>规范 URL<input value={platformLinkForm.canonicalUrl} onChange={(e) => setPlatformLinkForm((prev) => ({ ...prev, canonicalUrl: e.target.value }))} /></label>
+              <label>标题<input value={platformLinkForm.title} onChange={(e) => setPlatformLinkForm((prev) => ({ ...prev, title: e.target.value }))} /></label>
+              <label>说明<textarea value={platformLinkForm.description} onChange={(e) => setPlatformLinkForm((prev) => ({ ...prev, description: e.target.value }))} /></label>
+              <label>作者展示名<input value={platformLinkForm.authorDisplay} onChange={(e) => setPlatformLinkForm((prev) => ({ ...prev, authorDisplay: e.target.value }))} /></label>
+              <label>缩略图 URL<input value={platformLinkForm.thumbnailUrl} onChange={(e) => setPlatformLinkForm((prev) => ({ ...prev, thumbnailUrl: e.target.value }))} /></label>
+              <label>存档 URL<input value={platformLinkForm.archiveUrl} onChange={(e) => setPlatformLinkForm((prev) => ({ ...prev, archiveUrl: e.target.value }))} /></label>
+              <button onClick={handleCreatePlatformLink}><Link2 size={14} /> 新增外链</button>
+            </div>
+	        )}
       </div>
     </SimplePage>
   );
@@ -1670,6 +2056,13 @@ export function App() {
   const [eventPage, setEventPage] = useState(1);
   const [loadingEvents, setLoadingEvents] = useState(true);
   const [eventListError, setEventListError] = useState("");
+  const [facets, setFacets] = useState<EventFacetsDto | null>(null);
+  const [searchResults, setSearchResults] = useState<SearchResultDto[]>([]);
+  const [searchTotal, setSearchTotal] = useState(0);
+  const [loadingSearch, setLoadingSearch] = useState(false);
+  const [searchError, setSearchError] = useState("");
+  const eventRequestSeq = useRef(0);
+  const searchRequestSeq = useRef(0);
 
   // Filters for Events Index
   const [searchQuery, setSearchQuery] = useState("");
@@ -1683,17 +2076,26 @@ export function App() {
     fetchEvents()
       .then((items) => {
         setEvents(items);
-        setEventResults(items);
-        setEventTotal(items.length);
       })
       .catch((err) => setEventListError(err instanceof Error ? err.message : "事件列表加载失败"))
       .finally(() => setLoadingEvents(false));
+    fetchEventFacets().then(setFacets).catch(() => setFacets(null));
   }, []);
 
-  // Set pre-filtered topic from route queries if navigated from Topic Map
   useEffect(() => {
-    if (route.name === "events" && route.initialTopic) {
-      setSelectedTopic(route.initialTopic);
+    if (route.name === "events") {
+      setSearchQuery(route.params.get("q") ?? "");
+      setSelectedTopic(route.params.get("topic") ?? "");
+      setSelectedStatus(route.params.get("status") ?? "");
+      setSelectedPlatform(route.params.get("platform") ?? "");
+      const sort = route.params.get("sort");
+      setSelectedSort(sort === "newest" || sort === "oldest" || sort === "sourceCount" ? sort : "updated");
+      const page = Number(route.params.get("page") ?? "1");
+      setEventPage(Number.isInteger(page) && page > 0 ? page : 1);
+    } else if (route.name === "search") {
+      setSearchQuery(route.params.get("q") ?? "");
+      const page = Number(route.params.get("page") ?? "1");
+      setEventPage(Number.isInteger(page) && page > 0 ? page : 1);
     }
   }, [route]);
 
@@ -1703,6 +2105,8 @@ export function App() {
 
   useEffect(() => {
     if (route.name !== "events" && route.name !== "search") return;
+    if (route.name !== "events") return;
+    const seq = ++eventRequestSeq.current;
     setLoadingEvents(true);
     setEventListError("");
     fetchEventPage({
@@ -1715,12 +2119,64 @@ export function App() {
       sort: selectedSort
     })
       .then((data) => {
+        if (seq !== eventRequestSeq.current) return;
         setEventResults(data.items);
         setEventTotal(data.total);
       })
-      .catch((err) => setEventListError(err instanceof Error ? err.message : "事件列表加载失败"))
-      .finally(() => setLoadingEvents(false));
+      .catch((err) => {
+        if (seq === eventRequestSeq.current) setEventListError(err instanceof Error ? err.message : "事件列表加载失败");
+      })
+      .finally(() => {
+        if (seq === eventRequestSeq.current) setLoadingEvents(false);
+      });
   }, [route.name, eventPage, searchQuery, selectedTopic, selectedStatus, selectedPlatform, selectedSort]);
+
+  useEffect(() => {
+    if (route.name !== "events") return;
+    const next = new URLSearchParams();
+    if (searchQuery.trim()) next.set("q", searchQuery.trim());
+    if (selectedTopic) next.set("topic", selectedTopic);
+    if (selectedStatus) next.set("status", selectedStatus);
+    if (selectedPlatform) next.set("platform", selectedPlatform);
+    if (selectedSort !== "updated") next.set("sort", selectedSort);
+    if (eventPage > 1) next.set("page", String(eventPage));
+    const path = `/events${next.toString() ? `?${next}` : ""}`;
+    if (`${window.location.pathname}${window.location.search}` !== path) {
+      window.history.replaceState({}, "", path);
+    }
+  }, [route.name, eventPage, searchQuery, selectedTopic, selectedStatus, selectedPlatform, selectedSort]);
+
+  useEffect(() => {
+    if (route.name !== "search") return;
+    const query = searchQuery.trim();
+    const next = new URLSearchParams();
+    if (query) next.set("q", query);
+    if (eventPage > 1) next.set("page", String(eventPage));
+    const path = `/search${next.toString() ? `?${next}` : ""}`;
+    if (`${window.location.pathname}${window.location.search}` !== path) {
+      window.history.replaceState({}, "", path);
+    }
+    if (!query) {
+      setSearchResults([]);
+      setSearchTotal(0);
+      return;
+    }
+    const seq = ++searchRequestSeq.current;
+    setLoadingSearch(true);
+    setSearchError("");
+    searchArchive({ q: query, page: eventPage, pageSize: 12 })
+      .then((data) => {
+        if (seq !== searchRequestSeq.current) return;
+        setSearchResults(data.items);
+        setSearchTotal(data.total);
+      })
+      .catch((err) => {
+        if (seq === searchRequestSeq.current) setSearchError(err instanceof Error ? err.message : "检索失败");
+      })
+      .finally(() => {
+        if (seq === searchRequestSeq.current) setLoadingSearch(false);
+      });
+  }, [route.name, eventPage, searchQuery]);
 
   let pageContent: React.ReactNode;
 
@@ -1755,63 +2211,21 @@ export function App() {
             </div>
           </div>
           
-          <div className="hero-stats">
-            <div className="hero-stat-item">
-               <strong>{events.length || "2"} 卷</strong>
-               <span>在册争议事件</span>
-            </div>
-            <div className="hero-stat-item">
-              <strong>{events.reduce((sum, e) => sum + e.sourceCount, 0) || "8"} 份</strong>
-              <span>认证原始材料</span>
-            </div>
-            <div className="hero-stat-item">
-              <strong>{events.reduce((sum, e) => sum + e.platformLinkCount, 0) || "6"} 条</strong>
-              <span>存卷跳转外链</span>
-            </div>
-          </div>
-        </section>
-
-        {/* 待核验线索池 */}
-        <section className="candidates-band" style={{ padding: "4rem 2rem", borderBottom: "1px solid var(--border-color)" }}>
-          <div className="section-heading">
-            <div>
-              <p className="eyebrow">Pending Signals / 待建档库</p>
-              <h2>待核验线索池</h2>
-            </div>
-          </div>
-          <div className="candidates-grid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: "1.5rem" }}>
-            {mockCandidates.map((candidate) => (
-              <article key={candidate.id} className="candidate-card" style={{ backgroundColor: "var(--bg-card)", border: "1px solid var(--border-color)", padding: "1.5rem", borderRadius: "var(--radius-sm)" }}>
-                <div className="candidate-cover" style={{ height: "120px", margin: "-1.5rem -1.5rem 1.25rem", borderBottom: "1px solid var(--border-color)", backgroundColor: "var(--bg-stamp)", display: "flex", alignItems: "center", justifyContent: "center", color: "var(--text-tertiary)", fontSize: "0.9rem", position: "relative", overflow: "hidden" }}>
-                  {candidate.coverImage?.url ? (
-                    <>
-                      <img src={candidate.coverImage.url} alt={candidate.coverImage.alt} style={{ width: "100%", height: "100%", objectFit: "cover" }} />
-                      <div className="candidate-cover-source" style={{ position: "absolute", bottom: 0, left: 0, right: 0, backgroundColor: "rgba(0,0,0,0.62)", color: "#fff", padding: "0.25rem 0.6rem", fontSize: "0.72rem" }}>
-                        来源：<a href={candidate.coverImage.sourceUrl} target="_blank" rel="noopener noreferrer" style={{ color: "#fff", textDecoration: "underline" }}>{candidate.coverImage.sourceTitle}</a>
-                      </div>
-                    </>
-                  ) : (
-                    <span>暂无可核验配图</span>
-                  )}
-                </div>
-                <div className="candidate-topline" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "1rem" }}>
-                  <span className="candidate-badge status-pending" style={{ backgroundColor: "var(--bg-stamp)", color: "var(--accent-yellow)", fontSize: "0.75rem", padding: "0.2rem 0.5rem", borderRadius: "2px", fontWeight: 600 }}>
-                    {candidate.status}
-                  </span>
-                  <span className="candidate-community" style={{ fontSize: "0.8rem", color: "var(--text-tertiary)" }}>
-                    {candidate.community}
-                  </span>
-                </div>
-                <h3 style={{ fontSize: "1.1rem", fontFamily: "var(--font-serif)", fontWeight: 700, marginBottom: "0.8rem", color: "var(--text-primary)" }}>{candidate.title}</h3>
-                <div className="candidate-details" style={{ fontSize: "0.85rem", color: "var(--text-secondary)", display: "flex", flexDirection: "column", gap: "0.4rem" }}>
-                  <p><strong>当前阶段：</strong>{candidate.stage}</p>
-                  <p><strong>核心关注：</strong>{candidate.focus}</p>
-                  <p><strong>度量：</strong>{candidate.discussionMetrics.sourceCount} 来源 / {candidate.discussionMetrics.platformCount} 平台</p>
-                </div>
-              </article>
-            ))}
-          </div>
-        </section>
+	          <div className="hero-stats">
+	            <div className="hero-stat-item">
+	               <strong>{events.length} 卷</strong>
+	               <span>在册争议事件</span>
+	            </div>
+	            <div className="hero-stat-item">
+	              <strong>{events.reduce((sum, e) => sum + e.sourceCount, 0)} 份</strong>
+	              <span>认证原始材料</span>
+	            </div>
+	            <div className="hero-stat-item">
+	              <strong>{events.reduce((sum, e) => sum + e.platformLinkCount, 0)} 条</strong>
+	              <span>存卷跳转外链</span>
+	            </div>
+	          </div>
+	        </section>
 
         {/* 资料完整度与更新度 */}
         <section className="ranking-band" style={{ padding: "4rem 2rem", borderBottom: "1px solid var(--border-color)" }}>
@@ -1849,9 +2263,9 @@ export function App() {
                     )}
                   </div>
                   <div className="ranking-main" style={{ flex: 1, padding: "1.2rem 1.5rem" }}>
-                    <h3 className="ranking-title" onClick={() => navigate(`/events/${event.slug}`)} style={{ fontSize: "1.15rem", fontFamily: "var(--font-serif)", fontWeight: 700, cursor: "pointer", color: "var(--text-primary)", marginBottom: "0.8rem" }}>
-                      {event.neutralTitle}
-                    </h3>
+	                    <button className="ranking-title" onClick={() => navigate(`/events/${event.slug}`)} style={{ fontSize: "1.15rem", fontFamily: "var(--font-serif)", fontWeight: 700, cursor: "pointer", color: "var(--text-primary)", marginBottom: "0.8rem" }}>
+	                      {event.neutralTitle}
+	                    </button>
                     <div className="ranking-metrics-grid" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: "1rem" }}>
                       <div className="ranking-metric">
                         <span className="metric-label" style={{ display: "block", fontSize: "0.75rem", color: "var(--text-tertiary)" }}>公开来源数</span>
@@ -1909,10 +2323,8 @@ export function App() {
     );
   }
 
-  if (route.name === "events") {
-    const uniqueTopics = Array.from(
-      new Set(events.map((e) => e.topic).filter(Boolean))
-    ) as { slug: string; name: string }[];
+	  if (route.name === "events") {
+	    const uniqueTopics = facets?.topics ?? [];
 
     pageContent = (
       <main className="page-shell">
@@ -1934,9 +2346,10 @@ export function App() {
                 onChange={(e) => setSearchQuery(e.target.value)}
               />
               {searchQuery && (
-                <button
-                  style={{ background: "none", border: "none", cursor: "pointer", display: "flex" }}
-                  onClick={() => setSearchQuery("")}
+	                <button
+                    aria-label="清空搜索词"
+	                  style={{ background: "none", border: "none", cursor: "pointer", display: "flex" }}
+	                  onClick={() => setSearchQuery("")}
                 >
                   <X size={14} style={{ color: "var(--text-tertiary)" }} />
                 </button>
@@ -2064,6 +2477,10 @@ export function App() {
   }
 
   if (route.name === "search") {
+    const submitSearch = () => {
+      setEventPage(1);
+      navigate(`/search${searchQuery.trim() ? `?q=${encodeURIComponent(searchQuery.trim())}` : ""}`);
+    };
     pageContent = (
       <SimplePage title="全文卷宗检索" eyebrow="Search Database" icon={<Search size={22} />}>
         <DevFallbackNotice />
@@ -2075,26 +2492,31 @@ export function App() {
             onChange={(e) => setSearchQuery(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter") {
-                // Trigger action if needed
+                submitSearch();
               }
             }}
           />
-          <button onClick={() => {}}>检索</button>
+          <button onClick={submitSearch}>检索</button>
         </div>
 
         {searchQuery.trim() ? (
           <div className="search-results-section animate-fade">
-            <h2>匹配到的在册事件 ({eventTotal})</h2>
-            {eventListError ? (
-              <ErrorState title="检索失败" body={eventListError} onRetry={() => window.location.reload()} />
-            ) : loadingEvents ? (
+            <h2>匹配到的公开资料 ({searchTotal})</h2>
+            {searchError ? (
+              <ErrorState title="检索失败" body={searchError} onRetry={() => window.location.reload()} />
+            ) : loadingSearch ? (
               <LoadingState />
-            ) : eventResults.length === 0 ? (
-              <p style={{ color: "var(--text-tertiary)", fontSize: "0.95rem" }}>暂无匹配的事件卷宗。</p>
+            ) : searchResults.length === 0 ? (
+              <p style={{ color: "var(--text-tertiary)", fontSize: "0.95rem" }}>暂无匹配的公开资料。</p>
             ) : (
-              <div className="event-grid">
-                {eventResults.map((event) => (
-                  <EventCard key={event.id} event={event} />
+              <div className="search-result-list">
+                {searchResults.map((result) => (
+                  <article className="search-result-item" key={`${result.type}-${result.id}`}>
+                    <span className="search-result-type">{searchResultTypeLabel(result.type)} / {result.matchedField}</span>
+                    <button onClick={() => navigate(`/events/${result.event.slug}`)}>{result.event.neutralTitle}</button>
+                    <p>{result.snippet}</p>
+                    <small>{formatDate(result.updatedAt)}</small>
+                  </article>
                 ))}
               </div>
             )}
@@ -2111,35 +2533,40 @@ export function App() {
   }
 
   if (route.name === "topics") {
-    // Collect simulated data or map categories
-    const topicCategories = [
-      { name: "婚恋与公共争议", slug: "relationship-public-disputes", desc: "关注网络婚恋纠纷、财产争议进入公共讨论后的传播路径与争议结构。", count: 1 },
-      { name: "校园公共争议", slug: "campus-public-disputes", desc: "关注校园内公开信举报、导师与学生关系、纪律处分等引起的平台大范围热议事件。", count: 1 },
-      { name: "职场性别争议", slug: "workplace-gender", desc: "关于职场待遇、性骚扰指控或劳动纠纷事件的演进存照。", count: 0 },
-      { name: "平台治理", slug: "platform-governance", desc: "关于社交平台算法封禁、禁言机制、评论区管控等干预逻辑的个案实录。", count: 0 },
-      { name: "司法程序", slug: "judicial-process", desc: "已进入公诉、民事起诉或仲裁阶段，具备官方裁判文书及法庭公开记录的事件记录。", count: 0 },
-      { name: "媒体跟进", slug: "media-follow-up", desc: "有专业深度调查记者或机构化媒体进行二次实地采访的事件合集。", count: 0 }
-    ];
+    const topicCategories = facets?.topics ?? [];
 
     pageContent = (
       <SimplePage title="议题地图" eyebrow="Topic Navigation Mapping" icon={<MapIcon size={22} />}>
-        <div className="topic-grid">
+        {topicCategories.length === 0 ? (
+          <EmptyState title="暂无公开议题" body="发布事件后会自动生成议题地图。" />
+        ) : (
+          <div className="topic-grid">
           {topicCategories.map((item) => (
             <article
               className="topic-card"
               key={item.slug}
+              role="link"
+              tabIndex={0}
               onClick={() => {
                 setSelectedTopic(item.slug);
                 navigate(`/events?topic=${item.slug}`);
               }}
+              onKeyDown={(eventKey) => {
+                if (eventKey.key === "Enter" || eventKey.key === " ") {
+                  eventKey.preventDefault();
+                  setSelectedTopic(item.slug);
+                  navigate(`/events?topic=${item.slug}`);
+                }
+              }}
             >
               <Tags size={24} />
               <h2>{item.name}</h2>
-              <p>{item.desc}</p>
+              <p>该议题下的公开档案会按资料来源、时间线和修订记录持续归档。</p>
               <span>已收录事件：{item.count} 卷</span>
             </article>
           ))}
-        </div>
+          </div>
+        )}
       </SimplePage>
     );
   }
