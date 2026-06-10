@@ -21,6 +21,7 @@ import {
 import { getPublicSiteUrl } from "../lib/public-url.js";
 import { getIdParam, getSlugParam } from "../lib/route-params.js";
 import { clientKey, consumeBucket, hasFilledHoneypot, rejectIfLimited } from "../lib/abuse.js";
+import { buildRevisionDiff } from "../lib/revision-diff.js";
 
 const eventSummaryInclude = {
   topic: true,
@@ -407,7 +408,13 @@ export async function registerPublicRoutes(app: FastifyInstance) {
         where: { eventId: event.id },
         orderBy: [{ publishedAt: "asc" }, { createdAt: "asc" }],
         skip: (query.page - 1) * query.pageSize,
-        take: query.pageSize
+        take: query.pageSize,
+        include: {
+          captures: {
+            orderBy: [{ createdAt: "desc" }],
+            take: 1
+          }
+        }
       }),
       prisma.source.count({ where: { eventId: event.id } })
     ]);
@@ -446,6 +453,25 @@ export async function registerPublicRoutes(app: FastifyInstance) {
         changeSummary: version.changeSummary,
         createdAt: version.createdAt.toISOString()
       }))
+    };
+  });
+
+  app.get("/api/events/:slug/versions/:versionId/diff", { schema: { tags: ["public"] } }, async (request, reply) => {
+    const slug = getSlugParam(request);
+    const versionId = (request.params as { versionId?: string }).versionId;
+    if (!versionId) return reply.code(404).send({ error: "VERSION_NOT_FOUND" });
+    const event = await prisma.event.findFirst({ where: { slug, editorialStatus: "PUBLISHED" }, select: { id: true } });
+    if (!event) return reply.code(404).send({ error: "EVENT_NOT_FOUND" });
+    const version = await prisma.eventVersion.findFirst({
+      where: { id: versionId, eventId: event.id }
+    });
+    if (!version) return reply.code(404).send({ error: "VERSION_NOT_FOUND" });
+    return {
+      id: version.id,
+      versionNumber: version.versionNumber,
+      changeSummary: version.changeSummary,
+      createdAt: version.createdAt.toISOString(),
+      changedFields: buildRevisionDiff(version.snapshotBefore, version.snapshotAfter)
     };
   });
 

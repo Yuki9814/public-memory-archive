@@ -53,6 +53,7 @@ pnpm run dev
 - `GET /api/events/:slug/sources`
 - `GET /api/events/:slug/platform-links`
 - `GET /api/events/:slug/versions`
+- `GET /api/events/:slug/versions/:versionId/diff`
 - `GET /api/feed.xml`
 - `GET /api/events/:slug/feed.xml`
 - `POST /api/submissions`
@@ -68,8 +69,11 @@ pnpm run dev
 - `POST /admin/sources/:id/capture`
 - `GET /admin/tasks/:taskId`
 - `POST /admin/events/:id/timeline`
+- `GET /admin/events/:id/timeline`
 - `POST /admin/events/:id/claims`
+- `GET /admin/events/:id/claims`
 - `POST /admin/events/:id/evidence`
+- `GET /admin/events/:id/evidence`
 - `POST /admin/claims/:id/evidence-links`
 - `POST /admin/events/:id/review`
 - `POST /admin/events/:id/publish`
@@ -77,6 +81,12 @@ pnpm run dev
 - `GET /admin/review-tasks`
 - `GET /admin/reports`
 - `POST /admin/reports/:id/resolve`
+- `GET /admin/submissions`
+- `POST /admin/submissions/:id/resolve`
+- `GET /admin/corrections`
+- `POST /admin/corrections/:id/resolve`
+- `GET /admin/events/:id/tasks`
+- `GET /admin/audit-logs`
 
 AI 辅助 API 只返回 `suggestions`，不写数据库：
 

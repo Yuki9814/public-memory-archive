@@ -4,9 +4,9 @@
 
 ## 页面
 
-- 首页：品牌第一屏、今日小风波候选、最新档案、讨论度量榜、方法论入口。
+- 首页：品牌第一屏、最新档案、资料完整度与更新度、方法论入口。
 - 事件列表页：分页、搜索、议题、标签、状态、平台、日期、排序。
-- 事件详情页：长阅读档案页。
+- 事件详情页：长阅读档案页，包含档案体检、锚点反馈、版本 diff。
 - 搜索页：跨事件、来源、标签、平台检索。
 - 议题地图页：按 topic 和 tag 组织事件。
 - 资料源页：来源等级、平台外链、存档状态。
@@ -17,8 +17,10 @@
 - 后台事件编辑页：调用 `/admin/events`。
 - 后台来源管理页：调用 `/admin/events/:id/sources` 与 `/admin/sources/:id/capture`。
 - 后台平台外链管理页：调用 `/admin/events/:id/platform-links`。
+- 后台证据编辑页：调用 `/admin/events/:id/timeline`、`/admin/events/:id/claims`、`/admin/events/:id/evidence`、`/admin/claims/:id/evidence-links`。
 - 后台审核队列页：调用 `/admin/review-tasks`。
 - 后台举报队列页：调用 `/admin/reports` 与 `/admin/reports/:id/resolve`。
+- 后台审计记录：调用 `/admin/audit-logs?entityType=&entityId=`。
 
 ## 事件详情页组件顺序
 
@@ -94,15 +96,15 @@ Fields:
 
 Display rules:
 
-- 首页标题使用“圈内风波，也需要长记忆”。
-- 候选池标题使用“今日小风波候选”。
-- `讨论度量榜` 只展示公开来源数量、平台数量、时间线节点、最近更新、讨论阶段。
-- 榜项说明固定为“按公开来源数量与更新时间排序，不代表事实判断。”
+- 首页标题使用“公共事件，需要可复核记忆”。
+- 不展示公开候选池，Candidate 后续必须先完成隐私预检模型再公开化。
+- `资料完整度与更新度` 只展示公开来源数量、平台数量、时间线节点、最近更新、讨论阶段。
+- 度量说明固定为“按公开来源数量与更新时间整理，不代表事实判断。”
 - 禁止出现热搜、爆了、开冲、站队、男女阵营、胜负、黑红、挂人等动员或阵营化文案。
 
 ## CandidateSignals
 
-Source: frontend static candidate list, later可迁移为后台候选表。
+Source: 暂不公开展示。后续可迁移为后台候选表，但必须先通过隐私预检。
 
 Fields:
 
@@ -121,9 +123,27 @@ Fields:
 
 Display rules:
 
-- 候选池明确标记“待建档”，不写成热榜或推荐榜。
+- 高风险候选默认不公开。
+- 候选卡只展示抽象议题，不展示可识别当事信息。
 - 没有可溯源 `coverImage` 时显示“暂无可核验配图”。
-- 广州漫展围拍/骚扰类候选按“隐私与线下秩序”严肃处理，不娱乐化。
+
+## ArchiveHealth
+
+Source: 事件详情页由详情、来源、平台外链、主张、版本数据派生。
+
+Fields:
+
+- `strongEvidenceCount`
+- `weakSourceCount`
+- `unresolvedKeyClaimCount`
+- `captureCoverage`
+- `latestRevisionAt`
+
+Display rules:
+
+- 展示来源等级分布：A 强证据、B 直接材料、C 间接材料、D 弱线索、未定级。
+- 公开页区分“已存档”“待存档”“存档失败”，不得把未抓取来源写成已核验。
+- 关键主张未决数量只统计 `importance=KEY` 且状态为未核验、证据不足或有争议的主张。
 
 ## SessionState
 
@@ -295,12 +315,17 @@ Fields:
 
 Endpoint: `GET /api/events/:slug/versions`
 
+Diff endpoint: `GET /api/events/:slug/versions/:versionId/diff`
+
 Fields:
 
 - `items[].id`
 - `items[].versionNumber`
 - `items[].changeSummary`
 - `items[].createdAt`
+- `changedFields[].path`
+- `changedFields[].before`
+- `changedFields[].after`
 
 ## CorrectionCTA
 

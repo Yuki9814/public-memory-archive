@@ -467,17 +467,22 @@ model EventVersion {
 }
 
 model Correction {
-  id        String           @id @default(cuid())
-  eventId   String?          @map("event_id")
-  sourceId  String?          @map("source_id")
-  email     String?
-  title     String
-  body      String
-  status    CorrectionStatus @default(PENDING)
-  createdAt DateTime         @default(now()) @map("created_at")
-  updatedAt DateTime         @updatedAt @map("updated_at")
-  event     Event?           @relation(fields: [eventId], references: [id], onDelete: SetNull)
-  source    Source?          @relation(fields: [sourceId], references: [id], onDelete: SetNull)
+  id               String           @id @default(cuid())
+  eventId          String?          @map("event_id")
+  sourceId         String?          @map("source_id")
+  email            String?
+  title            String
+  body             String
+  status           CorrectionStatus @default(PENDING)
+  resolutionNotes  String?          @map("resolution_notes")
+  resolutionAction String?          @map("resolution_action")
+  linkedEntityType String?          @map("linked_entity_type")
+  linkedEntityId   String?          @map("linked_entity_id")
+  resolvedAt       DateTime?        @map("resolved_at")
+  createdAt        DateTime         @default(now()) @map("created_at")
+  updatedAt        DateTime         @updatedAt @map("updated_at")
+  event            Event?           @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  source           Source?          @relation(fields: [sourceId], references: [id], onDelete: SetNull)
 
   @@index([eventId])
   @@index([status])
@@ -540,16 +545,21 @@ model EventTag {
 }
 
 model Submission {
-  id        String           @id @default(cuid())
-  eventId   String?          @map("event_id")
-  email     String?
-  title     String
-  body      String
-  sourceUrl String?          @map("source_url")
-  status    SubmissionStatus @default(PENDING)
-  createdAt DateTime         @default(now()) @map("created_at")
-  updatedAt DateTime         @updatedAt @map("updated_at")
-  event     Event?           @relation(fields: [eventId], references: [id], onDelete: SetNull)
+  id               String           @id @default(cuid())
+  eventId          String?          @map("event_id")
+  email            String?
+  title            String
+  body             String
+  sourceUrl        String?          @map("source_url")
+  status           SubmissionStatus @default(PENDING)
+  resolutionNotes  String?          @map("resolution_notes")
+  resolutionAction String?          @map("resolution_action")
+  linkedEntityType String?          @map("linked_entity_type")
+  linkedEntityId   String?          @map("linked_entity_id")
+  resolvedAt       DateTime?        @map("resolved_at")
+  createdAt        DateTime         @default(now()) @map("created_at")
+  updatedAt        DateTime         @updatedAt @map("updated_at")
+  event            Event?           @relation(fields: [eventId], references: [id], onDelete: SetNull)
 
   @@index([eventId])
   @@index([status])

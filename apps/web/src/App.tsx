@@ -35,6 +35,7 @@ import type {
   PlatformLinkDto,
   ReportType,
   RevisionDto,
+  RevisionDiffDto,
   SourceDto,
   TimelineEntryDto,
   SessionDto,
@@ -48,19 +49,28 @@ import type {
 import { getEventProcessStatusLabel, getReliabilityLabel } from "@memory-archive/shared";
 import {
   captureSource,
+  createAdminClaim,
+  createAdminClaimEvidenceLink,
+  createAdminEvidence,
   createAdminEvent,
   createAdminPlatformLink,
   createAdminSource,
+  createAdminTimeline,
   createCorrection,
   createReport,
   createSubmission,
   fetchClaims,
+  fetchAdminAuditLogs,
+  fetchAdminClaims,
   fetchAdminCorrections,
+  fetchAdminEventTasks,
+  fetchAdminEvidence,
   fetchAdminEvents,
   fetchAdminReports,
   fetchAdminSources,
   fetchAdminSubmissions,
   fetchAdminTask,
+  fetchAdminTimeline,
   fetchEventDetail,
   fetchEventFacets,
   fetchEventPage,
@@ -71,6 +81,7 @@ import {
   fetchSources,
   fetchTimeline,
   fetchVersions,
+  fetchRevisionDiff,
   failedChecksFromError,
   isDevMockFallbackEnabled,
   loginAdmin,
@@ -83,6 +94,7 @@ import {
   updateAdminEvent,
   type AdminCorrectionDto,
   type AdminEventDto,
+  type AdminAuditLogDto,
   type AdminReportDto,
   type AdminSourceDto,
   type AdminSubmissionDto,
@@ -226,6 +238,38 @@ function editorialStatusLabel(value: string) {
     ARCHIVED: "已归档"
   };
   return labels[value] ?? value;
+}
+
+function captureStatusLabel(value?: string | null) {
+  const labels: Record<string, string> = {
+    QUEUED: "待抓取",
+    RUNNING: "抓取中",
+    SUCCEEDED: "已存档",
+    FAILED: "存档失败",
+    SKIPPED: "已跳过"
+  };
+  return value ? labels[value] ?? value : "待存档";
+}
+
+function feedbackPath(
+  kind: "correction" | "report",
+  params: {
+    eventId?: string;
+    eventTitle?: string;
+    sourceId?: string | null;
+    sourceTitle?: string | null;
+    platformLinkId?: string | null;
+    platformTitle?: string | null;
+  }
+) {
+  const query = new URLSearchParams();
+  if (params.eventId) query.set("eventId", params.eventId);
+  if (params.eventTitle) query.set("eventTitle", params.eventTitle);
+  if (params.sourceId) query.set("sourceId", params.sourceId);
+  if (params.sourceTitle) query.set("sourceTitle", params.sourceTitle);
+  if (params.platformLinkId) query.set("platformLinkId", params.platformLinkId);
+  if (params.platformTitle) query.set("platformTitle", params.platformTitle);
+  return `/${kind === "correction" ? "corrections" : "reports"}${query.toString() ? `?${query.toString()}` : ""}`;
 }
 
 function reportTypeLabel(value: string) {
@@ -547,8 +591,13 @@ function CredibilitySummary({
 }) {
   const strongEvidenceCount = claims.flatMap((claim) => claim.evidenceLinks).filter((link) => link.evidence.reliabilityLevel === "A_STRONG").length;
   const weakSourceCount = sources.filter((source) => source.reliabilityLevel === "D_WEAK" || source.reliabilityLevel === "UNKNOWN").length;
-  const openClaimCount = claims.filter((claim) => claim.status === "UNVERIFIED" || claim.status === "INSUFFICIENT_EVIDENCE" || claim.status === "DISPUTED").length;
-  const archivedLinkCount = links.filter((link) => !!link.archiveUrl || !!link.capturedAt).length;
+  const openClaimCount = claims.filter((claim) => claim.importance === "KEY" && (claim.status === "UNVERIFIED" || claim.status === "INSUFFICIENT_EVIDENCE" || claim.status === "DISPUTED")).length;
+  const archivedLinkCount = links.filter((link) => !!link.archiveUrl || !!link.capturedAt || link.availabilityStatus === "ARCHIVED_ONLY").length;
+  const captureCoverage = links.length > 0 ? Math.round((archivedLinkCount / links.length) * 100) : 0;
+  const reliabilityGroups = sources.reduce<Record<string, number>>((acc, source) => {
+    acc[source.reliabilityLevel] = (acc[source.reliabilityLevel] ?? 0) + 1;
+    return acc;
+  }, {});
   const latestVersion = versions[0];
 
   return (
@@ -567,24 +616,31 @@ function CredibilitySummary({
           <strong>{weakSourceCount}</strong>
         </div>
         <div>
-          <span>未决主张</span>
+          <span>未决关键主张</span>
           <strong>{openClaimCount}</strong>
         </div>
         <div>
-          <span>已存档外链</span>
-          <strong>{archivedLinkCount}/{links.length}</strong>
+          <span>存档覆盖率</span>
+          <strong>{captureCoverage}%</strong>
         </div>
+      </div>
+      <div className="reliability-strip" aria-label="来源等级分布">
+        {["A_STRONG", "B_DIRECT", "C_INDIRECT", "D_WEAK", "UNKNOWN"].map((level) => (
+          <span key={level} className={`reliability-badge level-${level.toLowerCase()}`}>
+            {reliabilityLabel(level)}：{reliabilityGroups[level] ?? 0}
+          </span>
+        ))}
       </div>
       <p className="credibility-note">
         当前阶段：{processStatusLabel(event.eventProcessStatus)}。最近版本：
-        {latestVersion ? `v${latestVersion.versionNumber}，${formatDate(latestVersion.createdAt)}` : "暂无修订记录"}。
+        {latestVersion ? `v${latestVersion.versionNumber}，${formatDate(latestVersion.createdAt)}` : "暂无修订记录"}。已存档外链 {archivedLinkCount}/{links.length}。
       </p>
     </section>
   );
 }
 
 // 4. OriginalSourceLinks (Strict contract check)
-function OriginalSourceLinks({ links }: { links: PlatformLinkDto[] }) {
+function OriginalSourceLinks({ event, links }: { event: EventDetailDto; links: PlatformLinkDto[] }) {
   return (
     <section className="module animate-fade" id="original-source-links">
       <div className="module-title">
@@ -652,6 +708,19 @@ function OriginalSourceLinks({ links }: { links: PlatformLinkDto[] }) {
                     ) : (
                       <span className="muted-action">存档待生成</span>
                     )}
+                    <button
+                      type="button"
+                      className="inline-feedback-btn"
+                      onClick={() => navigate(feedbackPath("report", {
+                        eventId: event.id,
+                        eventTitle: event.neutralTitle,
+                        sourceId: link.sourceId,
+                        platformLinkId: link.id,
+                        platformTitle: link.title
+                      }))}
+                    >
+                      举报此链接
+                    </button>
                   </div>
                 </div>
               </article>
@@ -664,7 +733,7 @@ function OriginalSourceLinks({ links }: { links: PlatformLinkDto[] }) {
 }
 
 // 5. Timeline
-function Timeline({ timeline }: { timeline: TimelineEntryDto[] }) {
+function Timeline({ event, timeline }: { event: EventDetailDto; timeline: TimelineEntryDto[] }) {
   const sortedTimeline = useMemo(() => {
     return [...timeline].sort((a, b) => a.sortOrder - b.sortOrder);
   }, [timeline]);
@@ -692,6 +761,18 @@ function Timeline({ timeline }: { timeline: TimelineEntryDto[] }) {
                       {reliabilityLabel(entry.reliabilityLevel)}
                     </span>
                   )}
+                  <button
+                    type="button"
+                    className="inline-feedback-btn"
+                    onClick={() => navigate(feedbackPath("correction", {
+                      eventId: event.id,
+                      eventTitle: event.neutralTitle,
+                      sourceId: entry.sourceId,
+                      sourceTitle: entry.sourceTitle ?? entry.title
+                    }))}
+                  >
+                    纠错此节点
+                  </button>
                 </div>
               </div>
             </article>
@@ -703,7 +784,7 @@ function Timeline({ timeline }: { timeline: TimelineEntryDto[] }) {
 }
 
 // 6. ClaimMatrix
-function ClaimMatrix({ claims }: { claims: ClaimDto[] }) {
+function ClaimMatrix({ event, claims }: { event: EventDetailDto; claims: ClaimDto[] }) {
   return (
     <section className="module animate-fade" id="claim-matrix">
       <div className="module-title">
@@ -728,6 +809,19 @@ function ClaimMatrix({ claims }: { claims: ClaimDto[] }) {
               <div className="claim-statement">
                 <strong>{claim.claimantActorDisplay ?? "某声索方"} 主张：</strong>
                 {claim.statement}
+              </div>
+              <div className="claim-actions">
+                <button
+                  type="button"
+                  className="inline-feedback-btn"
+                  onClick={() => navigate(feedbackPath("correction", {
+                    eventId: event.id,
+                    eventTitle: event.neutralTitle,
+                    sourceTitle: claim.title
+                  }))}
+                >
+                  纠错此主张
+                </button>
               </div>
               
               {claim.evidenceLinks && claim.evidenceLinks.length > 0 && (
@@ -757,7 +851,7 @@ function ClaimMatrix({ claims }: { claims: ClaimDto[] }) {
 }
 
 // 7. EvidenceCabinet
-function EvidenceCabinet({ claims }: { claims: ClaimDto[] }) {
+function EvidenceCabinet({ event, claims }: { event: EventDetailDto; claims: ClaimDto[] }) {
   const evidenceList = useMemo(() => {
     const map = new Map<string, ClaimDto["evidenceLinks"][number]["evidence"]>();
     claims.forEach((claim) => {
@@ -791,6 +885,25 @@ function EvidenceCabinet({ claims }: { claims: ClaimDto[] }) {
               <h3>{item.title}</h3>
               <p>{item.description}</p>
               <small>绑定卷宗：{item.sourceTitle ?? "未关联外部卷宗"}</small>
+              <div className="card-actions compact">
+                {item.externalUrl && (
+                  <a href={item.externalUrl} target="_blank" rel="noopener noreferrer">
+                    打开证据 <ExternalLink size={12} />
+                  </a>
+                )}
+                <button
+                  type="button"
+                  className="inline-feedback-btn"
+                  onClick={() => navigate(feedbackPath("report", {
+                    eventId: event.id,
+                    eventTitle: event.neutralTitle,
+                    sourceId: item.sourceId,
+                    sourceTitle: item.sourceTitle ?? item.title
+                  }))}
+                >
+                  举报此证据
+                </button>
+              </div>
             </article>
           ))}
         </div>
@@ -800,7 +913,7 @@ function EvidenceCabinet({ claims }: { claims: ClaimDto[] }) {
 }
 
 // 8. SourceList
-function SourceList({ sources }: { sources: SourceDto[] }) {
+function SourceList({ event, sources }: { event: EventDetailDto; sources: SourceDto[] }) {
   return (
     <section className="module animate-fade" id="source-list">
       <div className="module-title">
@@ -826,14 +939,42 @@ function SourceList({ sources }: { sources: SourceDto[] }) {
                   <span>作者/发布者：<strong>{source.authorDisplay ?? "未标注"}</strong></span>
                   {source.publishedAt && <span>发布日期：<strong>{formatDate(source.publishedAt).split(" ")[0]}</strong></span>}
                   <span>来源类型：<strong>{source.sourceType}</strong></span>
+                  <span>存档状态：<strong>{captureStatusLabel(source.latestCaptureStatus)}</strong></span>
+                  {source.latestCaptureHash && <span>Hash：<strong>{source.latestCaptureHash.slice(0, 12)}</strong></span>}
                 </div>
               </div>
-              {source.url && (
-                <a href={source.url} target="_blank" rel="noopener noreferrer" className="source-open-btn">
-                  打开来源
-                  <ExternalLink size={12} />
-                </a>
-              )}
+              <div className="source-actions">
+                {source.url && (
+                  <a href={source.url} target="_blank" rel="noopener noreferrer" className="source-open-btn">
+                    打开来源
+                    <ExternalLink size={12} />
+                  </a>
+                )}
+                <button
+                  type="button"
+                  className="inline-feedback-btn"
+                  onClick={() => navigate(feedbackPath("correction", {
+                    eventId: event.id,
+                    eventTitle: event.neutralTitle,
+                    sourceId: source.id,
+                    sourceTitle: source.title
+                  }))}
+                >
+                  纠错此来源
+                </button>
+                <button
+                  type="button"
+                  className="inline-feedback-btn danger"
+                  onClick={() => navigate(feedbackPath("report", {
+                    eventId: event.id,
+                    eventTitle: event.neutralTitle,
+                    sourceId: source.id,
+                    sourceTitle: source.title
+                  }))}
+                >
+                  举报此来源
+                </button>
+              </div>
             </article>
           ))}
         </div>
@@ -882,7 +1023,33 @@ function BulletModule({
 }
 
 // 12. RevisionHistory
-function RevisionHistory({ versions }: { versions: RevisionDto[] }) {
+function RevisionHistory({ slug, versions }: { slug: string; versions: RevisionDto[] }) {
+  const [openVersionId, setOpenVersionId] = useState("");
+  const [diffs, setDiffs] = useState<Record<string, RevisionDiffDto>>({});
+  const [diffError, setDiffError] = useState("");
+
+  const toggleDiff = async (versionId: string) => {
+    setDiffError("");
+    if (openVersionId === versionId) {
+      setOpenVersionId("");
+      return;
+    }
+    setOpenVersionId(versionId);
+    if (diffs[versionId]) return;
+    try {
+      const diff = await fetchRevisionDiff(slug, versionId);
+      setDiffs((prev) => ({ ...prev, [versionId]: diff }));
+    } catch (err) {
+      setDiffError(err instanceof Error ? err.message : "版本差异加载失败");
+    }
+  };
+
+  const compactValue = (value: unknown) => {
+    if (value === null || value === undefined) return "空";
+    if (typeof value === "string") return value.length > 120 ? `${value.slice(0, 120)}...` : value;
+    return JSON.stringify(value);
+  };
+
   return (
     <section className="module animate-fade" id="revision-history">
       <div className="module-title">
@@ -899,6 +1066,28 @@ function RevisionHistory({ versions }: { versions: RevisionDto[] }) {
               <div className="revision-item-body">
                 <p>{version.changeSummary}</p>
                 <time>{formatDate(version.createdAt)}</time>
+                <button type="button" className="inline-feedback-btn" onClick={() => void toggleDiff(version.id)}>
+                  {openVersionId === version.id ? "收起字段差异" : "查看字段差异"}
+                </button>
+                {openVersionId === version.id && (
+                  <div className="revision-diff">
+                    {diffError ? (
+                      <span className="field-error">{diffError}</span>
+                    ) : !diffs[version.id] ? (
+                      <span>加载字段差异中...</span>
+                    ) : diffs[version.id].changedFields.length === 0 ? (
+                      <span>此版本未检测到字段级差异。</span>
+                    ) : (
+                      diffs[version.id].changedFields.slice(0, 8).map((field) => (
+                        <div key={field.path} className="revision-diff-row">
+                          <strong>{field.path}</strong>
+                          <span>旧：{compactValue(field.before)}</span>
+                          <span>新：{compactValue(field.after)}</span>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                )}
               </div>
             </article>
           ))}
@@ -1011,19 +1200,19 @@ function EventDetailPage({ slug }: { slug: string }) {
           <CurrentStatus event={event} />
           
           {/* 4. OriginalSourceLinks */}
-          <OriginalSourceLinks links={links} />
+          <OriginalSourceLinks event={event} links={links} />
           
           {/* 5. Timeline */}
-          <Timeline timeline={timeline} />
+          <Timeline event={event} timeline={timeline} />
           
           {/* 6. ClaimMatrix */}
-          <ClaimMatrix claims={claims} />
+          <ClaimMatrix event={event} claims={claims} />
           
           {/* 7. EvidenceCabinet */}
-          <EvidenceCabinet claims={claims} />
+          <EvidenceCabinet event={event} claims={claims} />
           
           {/* 8. SourceList */}
-          <SourceList sources={sources} />
+          <SourceList event={event} sources={sources} />
           
           {/* 9. WhatWeKnow */}
           <BulletModule
@@ -1053,7 +1242,7 @@ function EventDetailPage({ slug }: { slug: string }) {
           />
           
           {/* 12. RevisionHistory */}
-          <RevisionHistory versions={versions} />
+          <RevisionHistory slug={event.slug} versions={versions} />
           
           <div className="cta-row">
             {/* 13. CorrectionCTA */}
@@ -1338,6 +1527,7 @@ function AdminPage({ section }: { section: string }) {
     events: "事件发布预检",
     sources: "来源抓取任务",
     "platform-links": "后台平台外链管理",
+    evidence: "后台证据编辑",
     review: "线索与纠错队列",
     reports: "后台举报队列"
   };
@@ -1357,6 +1547,13 @@ function AdminPage({ section }: { section: string }) {
   const [captureResult, setCaptureResult] = useState<{ taskId: string; queued: boolean } | null>(null);
   const [taskLookupId, setTaskLookupId] = useState("");
   const [taskDetail, setTaskDetail] = useState<AdminTaskDto | null>(null);
+  const [adminTimeline, setAdminTimeline] = useState<TimelineEntryDto[]>([]);
+  const [adminClaims, setAdminClaims] = useState<ClaimDto[]>([]);
+  const [adminEvidence, setAdminEvidence] = useState<ClaimDto["evidenceLinks"][number]["evidence"][]>([]);
+  const [adminTasks, setAdminTasks] = useState<AdminTaskDto[]>([]);
+  const [auditLogs, setAuditLogs] = useState<AdminAuditLogDto[]>([]);
+  const [resolutionNotes, setResolutionNotes] = useState<Record<string, string>>({});
+  const [resolutionLinks, setResolutionLinks] = useState<Record<string, { entityType: string; entityId: string; action: string }>>({});
   const [eventForm, setEventForm] = useState({
     id: "",
     slug: "",
@@ -1396,6 +1593,36 @@ function AdminPage({ section }: { section: string }) {
     availabilityStatus: "UNKNOWN",
     archiveUrl: ""
   });
+  const [timelineForm, setTimelineForm] = useState({
+    title: "",
+    body: "",
+    happenedAt: "",
+    sourceId: "",
+    sortOrder: "0"
+  });
+  const [claimForm, setClaimForm] = useState({
+    title: "",
+    statement: "",
+    status: "UNVERIFIED",
+    importance: "KEY",
+    sourceId: ""
+  });
+  const [evidenceForm, setEvidenceForm] = useState({
+    title: "",
+    description: "",
+    evidenceKind: "OTHER",
+    reliabilityLevel: "UNKNOWN",
+    sourceId: "",
+    storageUrl: "",
+    externalUrl: "",
+    capturedAt: ""
+  });
+  const [claimLinkForm, setClaimLinkForm] = useState({
+    claimId: "",
+    evidenceId: "",
+    relationType: "SUPPORTS",
+    notes: ""
+  });
 
   const splitLines = (value: string) => value.split("\n").map((line) => line.trim()).filter(Boolean);
   const cleanOptional = (value: string) => value.trim() || undefined;
@@ -1405,7 +1632,7 @@ function AdminPage({ section }: { section: string }) {
     setAdminError("");
     setAdminMessage("");
     try {
-	      if (section === "events" || section === "sources" || section === "platform-links") {
+	      if (section === "events" || section === "sources" || section === "platform-links" || section === "evidence") {
 	        const data = await fetchAdminEvents({ pageSize: 50 });
 	        setAdminEvents(data.items);
           if (!selectedAdminEventId && data.items[0]) {
@@ -1438,6 +1665,31 @@ function AdminPage({ section }: { section: string }) {
       .then((data) => setAdminSources(data.items))
       .catch(() => setAdminSources([]));
   }, [selectedAdminEventId]);
+
+  useEffect(() => {
+    if (!selectedAdminEventId || (section !== "evidence" && section !== "sources")) return;
+    if (section === "sources") {
+      fetchAdminEventTasks(selectedAdminEventId)
+        .then((taskData) => setAdminTasks(taskData.items))
+        .catch(() => setAdminTasks([]));
+      return;
+    }
+    Promise.all([
+      fetchAdminTimeline(selectedAdminEventId),
+      fetchAdminClaims(selectedAdminEventId),
+      fetchAdminEvidence(selectedAdminEventId),
+      fetchAdminEventTasks(selectedAdminEventId),
+      fetchAdminAuditLogs({ entityType: "Event", entityId: selectedAdminEventId })
+    ])
+      .then(([timelineData, claimData, evidenceData, taskData, auditData]) => {
+        setAdminTimeline(timelineData.items);
+        setAdminClaims(claimData.items);
+        setAdminEvidence(evidenceData.items);
+        setAdminTasks(taskData.items);
+        setAuditLogs(auditData);
+      })
+      .catch((err) => setAdminError(err instanceof Error ? err.message : "证据工作区加载失败"));
+  }, [selectedAdminEventId, section, adminMessage]);
 
   const handlePublish = async (event: AdminEventDto) => {
     setPublishingId(event.id);
@@ -1476,7 +1728,14 @@ function AdminPage({ section }: { section: string }) {
   const handleSubmissionAction = async (item: AdminSubmissionDto, status: "REVIEWED" | "ACCEPTED" | "REJECTED") => {
     setAdminError("");
     try {
-      await resolveAdminSubmission(item.id, status);
+      const link = resolutionLinks[item.id];
+      await resolveAdminSubmission(item.id, {
+        status,
+        resolutionNotes: resolutionNotes[item.id]?.trim() || (status === "REVIEWED" ? "已完成初步复核。" : status === "ACCEPTED" ? "已采纳为编辑材料。" : "经复核暂不采纳。"),
+        resolutionAction: link?.action || (status === "ACCEPTED" ? "accepted_as_material" : status.toLowerCase()),
+        linkedEntityType: link?.entityType || undefined,
+        linkedEntityId: link?.entityId || undefined
+      });
       setAdminMessage(`线索 ${item.id} 已更新为 ${queueStatusLabel(status)}。`);
       await loadAdminData();
     } catch (err) {
@@ -1487,7 +1746,14 @@ function AdminPage({ section }: { section: string }) {
   const handleCorrectionAction = async (item: AdminCorrectionDto, status: "ACCEPTED" | "REJECTED" | "RESOLVED") => {
     setAdminError("");
     try {
-      await resolveAdminCorrection(item.id, status);
+      const link = resolutionLinks[item.id];
+      await resolveAdminCorrection(item.id, {
+        status,
+        resolutionNotes: resolutionNotes[item.id]?.trim() || (status === "REJECTED" ? "经复核暂不采纳。" : "已按关联对象完成复核处理。"),
+        resolutionAction: link?.action || (status === "REJECTED" ? "rejected_after_review" : "linked_entity_updated"),
+        linkedEntityType: link?.entityType || (item.sourceId ? "Source" : item.eventId ? "Event" : undefined),
+        linkedEntityId: link?.entityId || item.sourceId || item.eventId || undefined
+      });
       setAdminMessage(`纠错 ${item.id} 已更新为 ${queueStatusLabel(status)}。`);
       await loadAdminData();
     } catch (err) {
@@ -1629,10 +1895,95 @@ function AdminPage({ section }: { section: string }) {
     }
   };
 
+  const handleCreateTimeline = async () => {
+    if (!selectedAdminEventId) {
+      setAdminError("请先选择事件。");
+      return;
+    }
+    setAdminError("");
+    try {
+      await createAdminTimeline(selectedAdminEventId, {
+        title: timelineForm.title.trim(),
+        body: timelineForm.body.trim(),
+        happenedAt: timelineForm.happenedAt,
+        sourceId: cleanOptional(timelineForm.sourceId),
+        sortOrder: Number(timelineForm.sortOrder || "0")
+      });
+      setTimelineForm({ title: "", body: "", happenedAt: "", sourceId: "", sortOrder: "0" });
+      setAdminMessage("时间线节点已新增。");
+    } catch (err) {
+      setAdminError(err instanceof Error ? err.message : "时间线新增失败");
+    }
+  };
+
+  const handleCreateClaim = async () => {
+    if (!selectedAdminEventId) {
+      setAdminError("请先选择事件。");
+      return;
+    }
+    setAdminError("");
+    try {
+      await createAdminClaim(selectedAdminEventId, {
+        title: claimForm.title.trim(),
+        statement: claimForm.statement.trim(),
+        status: claimForm.status as ClaimDto["status"],
+        importance: claimForm.importance as ClaimDto["importance"],
+        sourceId: cleanOptional(claimForm.sourceId)
+      });
+      setClaimForm((prev) => ({ ...prev, title: "", statement: "" }));
+      setAdminMessage("主张已新增。");
+    } catch (err) {
+      setAdminError(err instanceof Error ? err.message : "主张新增失败");
+    }
+  };
+
+  const handleCreateEvidence = async () => {
+    if (!selectedAdminEventId) {
+      setAdminError("请先选择事件。");
+      return;
+    }
+    setAdminError("");
+    try {
+      await createAdminEvidence(selectedAdminEventId, {
+        title: evidenceForm.title.trim(),
+        description: evidenceForm.description.trim(),
+        evidenceKind: evidenceForm.evidenceKind,
+        reliabilityLevel: evidenceForm.reliabilityLevel as ReliabilityLevel,
+        sourceId: cleanOptional(evidenceForm.sourceId),
+        storageUrl: cleanOptional(evidenceForm.storageUrl),
+        externalUrl: cleanOptional(evidenceForm.externalUrl),
+        capturedAt: cleanOptional(evidenceForm.capturedAt)
+      });
+      setEvidenceForm((prev) => ({ ...prev, title: "", description: "", storageUrl: "", externalUrl: "" }));
+      setAdminMessage("证据已新增。");
+    } catch (err) {
+      setAdminError(err instanceof Error ? err.message : "证据新增失败");
+    }
+  };
+
+  const handleCreateClaimEvidenceLink = async () => {
+    if (!claimLinkForm.claimId || !claimLinkForm.evidenceId) {
+      setAdminError("请先选择主张和证据。");
+      return;
+    }
+    setAdminError("");
+    try {
+      await createAdminClaimEvidenceLink(claimLinkForm.claimId, {
+        evidenceId: claimLinkForm.evidenceId,
+        relationType: claimLinkForm.relationType as "SUPPORTS" | "OPPOSES" | "NEUTRAL" | "COMPLICATES",
+        notes: cleanOptional(claimLinkForm.notes)
+      });
+      setClaimLinkForm((prev) => ({ ...prev, notes: "" }));
+      setAdminMessage("主张与证据已关联。");
+    } catch (err) {
+      setAdminError(err instanceof Error ? err.message : "证据关联失败");
+    }
+  };
+
   return (
     <SimplePage title={titles[section] ?? "后台管理台"} eyebrow="Editorial Control Center" icon={<Database />}>
       <div className="admin-grid">
-        {["events", "sources", "platform-links", "review", "reports"].map((item) => (
+        {["events", "sources", "platform-links", "evidence", "review", "reports"].map((item) => (
           <button
             key={item}
             onClick={() => navigate(`/admin/${item}`)}
@@ -1807,6 +2158,175 @@ function AdminPage({ section }: { section: string }) {
                 </div>
               )}
             </div>
+            <div className="admin-tool-card">
+              <h3>当前事件抓取任务</h3>
+              <div className="task-detail">
+                {adminTasks.length === 0 ? (
+                  <span>暂无抓取任务。</span>
+                ) : (
+                  adminTasks.slice(0, 8).map((task) => (
+                    <small key={task.id}>
+                      {task.id} | {queueStatusLabel(task.status)} | {task.progress}% {task.errorMessage ? `| ${task.errorMessage}` : ""}
+                      {(task.captures ?? []).map((capture) => ` | ${capture.captureStatus}:${capture.contentHash?.slice(0, 10) ?? capture.errorMessage ?? capture.originalUrl}`)}
+                    </small>
+                  ))
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {!adminLoading && section === "evidence" && (
+          <div className="admin-tool-stack">
+            <div className="admin-tool-card">
+              <h3>选择事件</h3>
+              <label>
+                事件
+                <select value={selectedAdminEventId} onChange={(e) => setSelectedAdminEventId(e.target.value)}>
+                  <option value="">请选择事件</option>
+                  {adminEvents.map((event) => <option key={event.id} value={event.id}>{event.neutralTitle}</option>)}
+                </select>
+              </label>
+              <div className="admin-form-grid">
+                <span>来源 {adminSources.length}</span>
+                <span>时间线 {adminTimeline.length}</span>
+                <span>主张 {adminClaims.length}</span>
+                <span>证据 {adminEvidence.length}</span>
+              </div>
+            </div>
+
+            <div className="admin-tool-card">
+              <h3>新增时间线节点</h3>
+              <div className="admin-form-grid">
+                <label>标题<input value={timelineForm.title} onChange={(e) => setTimelineForm((prev) => ({ ...prev, title: e.target.value }))} /></label>
+                <label>发生时间<input type="datetime-local" value={timelineForm.happenedAt} onChange={(e) => setTimelineForm((prev) => ({ ...prev, happenedAt: e.target.value }))} /></label>
+                <label>绑定来源
+                  <select value={timelineForm.sourceId} onChange={(e) => setTimelineForm((prev) => ({ ...prev, sourceId: e.target.value }))}>
+                    <option value="">未绑定</option>
+                    {adminSources.map((source) => <option key={source.id} value={source.id}>{source.title}</option>)}
+                  </select>
+                </label>
+                <label>排序<input type="number" value={timelineForm.sortOrder} onChange={(e) => setTimelineForm((prev) => ({ ...prev, sortOrder: e.target.value }))} /></label>
+              </div>
+              <label>节点说明<textarea value={timelineForm.body} onChange={(e) => setTimelineForm((prev) => ({ ...prev, body: e.target.value }))} /></label>
+              <button onClick={handleCreateTimeline}><Clock3 size={14} /> 新增时间线</button>
+            </div>
+
+            <div className="admin-tool-card">
+              <h3>新增主张</h3>
+              <div className="admin-form-grid">
+                <label>标题<input value={claimForm.title} onChange={(e) => setClaimForm((prev) => ({ ...prev, title: e.target.value }))} /></label>
+                <label>状态
+                  <select value={claimForm.status} onChange={(e) => setClaimForm((prev) => ({ ...prev, status: e.target.value }))}>
+                    <option value="UNVERIFIED">未核验</option>
+                    <option value="INSUFFICIENT_EVIDENCE">证据不足</option>
+                    <option value="DISPUTED">有争议</option>
+                    <option value="PARTIALLY_SUPPORTED">部分支持</option>
+                    <option value="SUPPORTED">已支持</option>
+                    <option value="REFUTED">已驳回</option>
+                  </select>
+                </label>
+                <label>重要度
+                  <select value={claimForm.importance} onChange={(e) => setClaimForm((prev) => ({ ...prev, importance: e.target.value }))}>
+                    <option value="KEY">关键</option>
+                    <option value="CONTEXT">背景</option>
+                    <option value="LOW">低</option>
+                  </select>
+                </label>
+                <label>来源
+                  <select value={claimForm.sourceId} onChange={(e) => setClaimForm((prev) => ({ ...prev, sourceId: e.target.value }))}>
+                    <option value="">未绑定</option>
+                    {adminSources.map((source) => <option key={source.id} value={source.id}>{source.title}</option>)}
+                  </select>
+                </label>
+              </div>
+              <label>主张正文<textarea value={claimForm.statement} onChange={(e) => setClaimForm((prev) => ({ ...prev, statement: e.target.value }))} /></label>
+              <button onClick={handleCreateClaim}><TriangleAlert size={14} /> 新增主张</button>
+            </div>
+
+            <div className="admin-tool-card">
+              <h3>新增证据</h3>
+              <div className="admin-form-grid">
+                <label>标题<input value={evidenceForm.title} onChange={(e) => setEvidenceForm((prev) => ({ ...prev, title: e.target.value }))} /></label>
+                <label>类型
+                  <select value={evidenceForm.evidenceKind} onChange={(e) => setEvidenceForm((prev) => ({ ...prev, evidenceKind: e.target.value }))}>
+                    <option value="DOCUMENT">文档</option>
+                    <option value="SCREENSHOT">截图</option>
+                    <option value="VIDEO">视频</option>
+                    <option value="AUDIO">音频</option>
+                    <option value="POST">帖子</option>
+                    <option value="COMMENT">评论</option>
+                    <option value="ARTICLE">文章</option>
+                    <option value="ARCHIVE_CAPTURE">存档抓取</option>
+                    <option value="OTHER">其他</option>
+                  </select>
+                </label>
+                <label>可靠等级
+                  <select value={evidenceForm.reliabilityLevel} onChange={(e) => setEvidenceForm((prev) => ({ ...prev, reliabilityLevel: e.target.value }))}>
+                    <option value="A_STRONG">A 强证据</option>
+                    <option value="B_DIRECT">B 直接材料</option>
+                    <option value="C_INDIRECT">C 间接材料</option>
+                    <option value="D_WEAK">D 弱线索</option>
+                    <option value="UNKNOWN">未定级</option>
+                  </select>
+                </label>
+                <label>来源
+                  <select value={evidenceForm.sourceId} onChange={(e) => setEvidenceForm((prev) => ({ ...prev, sourceId: e.target.value }))}>
+                    <option value="">未绑定</option>
+                    {adminSources.map((source) => <option key={source.id} value={source.id}>{source.title}</option>)}
+                  </select>
+                </label>
+              </div>
+              <label>说明<textarea value={evidenceForm.description} onChange={(e) => setEvidenceForm((prev) => ({ ...prev, description: e.target.value }))} /></label>
+              <div className="admin-form-grid">
+                <label>存储 URL<input value={evidenceForm.storageUrl} onChange={(e) => setEvidenceForm((prev) => ({ ...prev, storageUrl: e.target.value }))} /></label>
+                <label>外部 URL<input value={evidenceForm.externalUrl} onChange={(e) => setEvidenceForm((prev) => ({ ...prev, externalUrl: e.target.value }))} /></label>
+                <label>抓取时间<input type="datetime-local" value={evidenceForm.capturedAt} onChange={(e) => setEvidenceForm((prev) => ({ ...prev, capturedAt: e.target.value }))} /></label>
+              </div>
+              <button onClick={handleCreateEvidence}><Archive size={14} /> 新增证据</button>
+            </div>
+
+            <div className="admin-tool-card">
+              <h3>关联主张与证据</h3>
+              <div className="admin-form-grid">
+                <label>主张
+                  <select value={claimLinkForm.claimId} onChange={(e) => setClaimLinkForm((prev) => ({ ...prev, claimId: e.target.value }))}>
+                    <option value="">请选择主张</option>
+                    {adminClaims.map((claim) => <option key={claim.id} value={claim.id}>{claim.title}</option>)}
+                  </select>
+                </label>
+                <label>证据
+                  <select value={claimLinkForm.evidenceId} onChange={(e) => setClaimLinkForm((prev) => ({ ...prev, evidenceId: e.target.value }))}>
+                    <option value="">请选择证据</option>
+                    {adminEvidence.map((item) => <option key={item.id} value={item.id}>{item.title}</option>)}
+                  </select>
+                </label>
+                <label>关系
+                  <select value={claimLinkForm.relationType} onChange={(e) => setClaimLinkForm((prev) => ({ ...prev, relationType: e.target.value }))}>
+                    <option value="SUPPORTS">支持</option>
+                    <option value="OPPOSES">相反</option>
+                    <option value="NEUTRAL">中性</option>
+                    <option value="COMPLICATES">补充复杂性</option>
+                  </select>
+                </label>
+              </div>
+              <label>关联说明<textarea value={claimLinkForm.notes} onChange={(e) => setClaimLinkForm((prev) => ({ ...prev, notes: e.target.value }))} /></label>
+              <button onClick={handleCreateClaimEvidenceLink}><Link2 size={14} /> 建立关联</button>
+            </div>
+
+            <div className="admin-tool-card">
+              <h3>抓取任务与审计记录</h3>
+              <div className="task-detail">
+                {adminTasks.slice(0, 6).map((task) => (
+                  <small key={task.id}>
+                    {task.id} | {task.type} | {queueStatusLabel(task.status)} | {task.progress}% {task.errorMessage ? `| ${task.errorMessage}` : ""}
+                  </small>
+                ))}
+                {auditLogs.slice(0, 6).map((log) => (
+                  <small key={log.id}>{formatDate(log.createdAt)} | {log.action} | {log.entityType}:{log.entityId}</small>
+                ))}
+              </div>
+            </div>
           </div>
         )}
 
@@ -1820,6 +2340,21 @@ function AdminPage({ section }: { section: string }) {
                   <strong className="admin-item-title">{item.title}</strong>
                   <span className="admin-item-desc">{item.body}</span>
                   {item.sourceUrl && <span className="admin-item-meta">来源链接：{item.sourceUrl}</span>}
+                  {item.resolutionNotes && <span className="admin-item-meta">处理记录：{item.resolutionNotes}</span>}
+                </div>
+                <div className="admin-resolution-fields">
+                  <label>处理说明
+                    <textarea
+                      value={resolutionNotes[item.id] ?? ""}
+                      onChange={(e) => setResolutionNotes((prev) => ({ ...prev, [item.id]: e.target.value }))}
+                      placeholder="记录采纳、驳回或转化方式"
+                    />
+                  </label>
+                  <div className="admin-form-grid">
+                    <label>关联类型<input value={resolutionLinks[item.id]?.entityType ?? ""} onChange={(e) => setResolutionLinks((prev) => ({ ...prev, [item.id]: { ...(prev[item.id] ?? { entityId: "", action: "" }), entityType: e.target.value } }))} placeholder="Event / Source" /></label>
+                    <label>关联 ID<input value={resolutionLinks[item.id]?.entityId ?? ""} onChange={(e) => setResolutionLinks((prev) => ({ ...prev, [item.id]: { ...(prev[item.id] ?? { entityType: "", action: "" }), entityId: e.target.value } }))} /></label>
+                    <label>处理动作<input value={resolutionLinks[item.id]?.action ?? ""} onChange={(e) => setResolutionLinks((prev) => ({ ...prev, [item.id]: { ...(prev[item.id] ?? { entityType: "", entityId: "" }), action: e.target.value } }))} placeholder="converted_to_source" /></label>
+                  </div>
                 </div>
                 <div className="admin-item-actions">
                   <button onClick={() => handleSubmissionAction(item, "REVIEWED")}><Check size={14} /> 已复核</button>
@@ -1838,6 +2373,21 @@ function AdminPage({ section }: { section: string }) {
                   <span className="admin-item-meta">
                     事件：{item.event?.neutralTitle ?? "未绑定"} | 来源：{item.source?.title ?? "未绑定"}
                   </span>
+                  {item.resolutionNotes && <span className="admin-item-meta">处理记录：{item.resolutionNotes}</span>}
+                </div>
+                <div className="admin-resolution-fields">
+                  <label>处理说明
+                    <textarea
+                      value={resolutionNotes[item.id] ?? ""}
+                      onChange={(e) => setResolutionNotes((prev) => ({ ...prev, [item.id]: e.target.value }))}
+                      placeholder="记录目标对象已如何修正"
+                    />
+                  </label>
+                  <div className="admin-form-grid">
+                    <label>关联类型<input value={resolutionLinks[item.id]?.entityType ?? ""} onChange={(e) => setResolutionLinks((prev) => ({ ...prev, [item.id]: { ...(prev[item.id] ?? { entityId: "", action: "" }), entityType: e.target.value } }))} placeholder="Event / Source / Claim" /></label>
+                    <label>关联 ID<input value={resolutionLinks[item.id]?.entityId ?? ""} onChange={(e) => setResolutionLinks((prev) => ({ ...prev, [item.id]: { ...(prev[item.id] ?? { entityType: "", action: "" }), entityId: e.target.value } }))} /></label>
+                    <label>处理动作<input value={resolutionLinks[item.id]?.action ?? ""} onChange={(e) => setResolutionLinks((prev) => ({ ...prev, [item.id]: { ...(prev[item.id] ?? { entityType: "", entityId: "" }), action: e.target.value } }))} placeholder="linked_entity_updated" /></label>
+                  </div>
                 </div>
                 <div className="admin-item-actions">
                   <button className="btn-success" onClick={() => handleCorrectionAction(item, "ACCEPTED")}><Check size={14} /> 采纳并快照</button>
@@ -2069,6 +2619,8 @@ export function App() {
   const [selectedTopic, setSelectedTopic] = useState<string>("");
   const [selectedStatus, setSelectedStatus] = useState<string>("");
   const [selectedPlatform, setSelectedPlatform] = useState<string>("");
+  const [selectedDateFrom, setSelectedDateFrom] = useState<string>("");
+  const [selectedDateTo, setSelectedDateTo] = useState<string>("");
   const [selectedSort, setSelectedSort] = useState<"updated" | "newest" | "oldest" | "sourceCount">("updated");
 
   useEffect(() => {
@@ -2088,6 +2640,8 @@ export function App() {
       setSelectedTopic(route.params.get("topic") ?? "");
       setSelectedStatus(route.params.get("status") ?? "");
       setSelectedPlatform(route.params.get("platform") ?? "");
+      setSelectedDateFrom(route.params.get("dateFrom") ?? "");
+      setSelectedDateTo(route.params.get("dateTo") ?? "");
       const sort = route.params.get("sort");
       setSelectedSort(sort === "newest" || sort === "oldest" || sort === "sourceCount" ? sort : "updated");
       const page = Number(route.params.get("page") ?? "1");
@@ -2101,7 +2655,7 @@ export function App() {
 
   useEffect(() => {
     setEventPage(1);
-  }, [searchQuery, selectedTopic, selectedStatus, selectedPlatform, selectedSort]);
+  }, [searchQuery, selectedTopic, selectedStatus, selectedPlatform, selectedDateFrom, selectedDateTo, selectedSort]);
 
   useEffect(() => {
     if (route.name !== "events" && route.name !== "search") return;
@@ -2116,6 +2670,8 @@ export function App() {
       topic: selectedTopic || undefined,
       eventProcessStatus: (selectedStatus as any) || undefined,
       platform: (selectedPlatform as any) || undefined,
+      dateFrom: selectedDateFrom || undefined,
+      dateTo: selectedDateTo || undefined,
       sort: selectedSort
     })
       .then((data) => {
@@ -2129,7 +2685,7 @@ export function App() {
       .finally(() => {
         if (seq === eventRequestSeq.current) setLoadingEvents(false);
       });
-  }, [route.name, eventPage, searchQuery, selectedTopic, selectedStatus, selectedPlatform, selectedSort]);
+  }, [route.name, eventPage, searchQuery, selectedTopic, selectedStatus, selectedPlatform, selectedDateFrom, selectedDateTo, selectedSort]);
 
   useEffect(() => {
     if (route.name !== "events") return;
@@ -2138,13 +2694,15 @@ export function App() {
     if (selectedTopic) next.set("topic", selectedTopic);
     if (selectedStatus) next.set("status", selectedStatus);
     if (selectedPlatform) next.set("platform", selectedPlatform);
+    if (selectedDateFrom) next.set("dateFrom", selectedDateFrom);
+    if (selectedDateTo) next.set("dateTo", selectedDateTo);
     if (selectedSort !== "updated") next.set("sort", selectedSort);
     if (eventPage > 1) next.set("page", String(eventPage));
     const path = `/events${next.toString() ? `?${next}` : ""}`;
     if (`${window.location.pathname}${window.location.search}` !== path) {
       window.history.replaceState({}, "", path);
     }
-  }, [route.name, eventPage, searchQuery, selectedTopic, selectedStatus, selectedPlatform, selectedSort]);
+  }, [route.name, eventPage, searchQuery, selectedTopic, selectedStatus, selectedPlatform, selectedDateFrom, selectedDateTo, selectedSort]);
 
   useEffect(() => {
     if (route.name !== "search") return;
@@ -2423,6 +2981,38 @@ export function App() {
               <option value="OTHER">其他</option>
             </select>
 
+            <input
+              type="date"
+              value={selectedDateFrom}
+              onChange={(e) => setSelectedDateFrom(e.target.value)}
+              aria-label="起始日期"
+              style={{
+                backgroundColor: "var(--bg-card)",
+                border: "1px solid var(--border-color)",
+                color: "var(--text-secondary)",
+                borderRadius: "var(--radius-sm)",
+                padding: "0.2rem 0.5rem",
+                fontSize: "0.9rem",
+                outline: "none"
+              }}
+            />
+
+            <input
+              type="date"
+              value={selectedDateTo}
+              onChange={(e) => setSelectedDateTo(e.target.value)}
+              aria-label="结束日期"
+              style={{
+                backgroundColor: "var(--bg-card)",
+                border: "1px solid var(--border-color)",
+                color: "var(--text-secondary)",
+                borderRadius: "var(--radius-sm)",
+                padding: "0.2rem 0.5rem",
+                fontSize: "0.9rem",
+                outline: "none"
+              }}
+            />
+
             <select
               value={selectedSort}
               onChange={(e) => setSelectedSort(e.target.value as typeof selectedSort)}
@@ -2450,8 +3040,8 @@ export function App() {
           <LoadingState />
         ) : eventResults.length === 0 ? (
           <EmptyState
-            title="未检索到匹配的档案"
-            body="建议尝试清除筛选条件，或使用不同的搜索词再次检索。"
+            title={searchQuery || selectedTopic || selectedStatus || selectedPlatform || selectedDateFrom || selectedDateTo ? "筛选条件下暂无匹配档案" : "暂无公开档案"}
+            body={searchQuery || selectedTopic || selectedStatus || selectedPlatform || selectedDateFrom || selectedDateTo ? "可清除部分筛选条件，或更换搜索词再次检索。" : "当前尚未发布任何公开卷宗。"}
           />
         ) : (
           <>

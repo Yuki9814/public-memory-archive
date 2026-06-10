@@ -12,6 +12,29 @@ type CaptureTarget = {
   url: string;
 };
 
+export type CaptureAttemptResult = {
+  captureId: string;
+  ok: boolean;
+  hash?: string;
+  error?: string;
+};
+
+export function summarizeCaptureResults(results: CaptureAttemptResult[]) {
+  if (results.length === 0) {
+    return {
+      status: "COMPLETED" as const,
+      errorMessage: null,
+      result: { captures: [], note: "No URL targets on source." }
+    };
+  }
+  const failed = results.filter((result) => !result.ok);
+  return {
+    status: failed.length === results.length ? "FAILED" as const : "COMPLETED" as const,
+    errorMessage: failed.length === results.length ? "All capture targets failed." : null,
+    result: { captures: results }
+  };
+}
+
 function addDays(date: Date, days: number) {
   const next = new Date(date);
   next.setDate(next.getDate() + days);
@@ -133,12 +156,13 @@ export async function captureSource(taskId: string, sourceId: string) {
   ];
 
   if (targets.length === 0) {
+    const summary = summarizeCaptureResults([]);
     await prisma.task.update({
       where: { id: taskId },
       data: {
-        status: "COMPLETED",
+        status: summary.status,
         progress: 100,
-        result: { captures: [], note: "No URL targets on source." },
+        result: summary.result,
         completedAt: new Date()
       }
     });
@@ -156,14 +180,14 @@ export async function captureSource(taskId: string, sourceId: string) {
     });
   }
 
-  const failed = results.filter((result) => !result.ok);
+  const summary = summarizeCaptureResults(results);
   await prisma.task.update({
     where: { id: taskId },
     data: {
-      status: failed.length === results.length ? "FAILED" : "COMPLETED",
+      status: summary.status,
       progress: 100,
-      result: { captures: results },
-      errorMessage: failed.length === results.length ? "All capture targets failed." : null,
+      result: summary.result,
+      errorMessage: summary.errorMessage,
       completedAt: new Date()
     }
   });

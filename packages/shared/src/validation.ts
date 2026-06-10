@@ -163,3 +163,47 @@ export const reportSchema = z.object({
   reporterEmail: z.string().email().optional(),
   body: z.string().min(1).max(4000)
 });
+
+export const linkedEntityTypes = [
+  "Event",
+  "Source",
+  "TimelineEntry",
+  "Claim",
+  "EvidenceItem",
+  "PlatformLink",
+  "Candidate"
+] as const;
+
+export const submissionResolveSchema = z.object({
+  status: z.enum(["REVIEWED", "ACCEPTED", "REJECTED"]),
+  resolutionNotes: z.string().trim().min(1).max(2000).optional(),
+  resolutionAction: z.string().trim().max(120).optional(),
+  linkedEntityType: z.enum(linkedEntityTypes).optional(),
+  linkedEntityId: z.string().trim().max(160).optional()
+}).refine((data) => {
+  return (!!data.linkedEntityType) === (!!data.linkedEntityId);
+}, {
+  message: "linkedEntityType and linkedEntityId must be provided together",
+  path: ["linkedEntityId"]
+});
+
+export const correctionResolveSchema = z.object({
+  status: z.enum(["ACCEPTED", "REJECTED", "RESOLVED"]),
+  resolutionNotes: z.string().trim().min(1).max(2000).optional(),
+  resolutionAction: z.string().trim().max(120).optional(),
+  linkedEntityType: z.enum(linkedEntityTypes).optional(),
+  linkedEntityId: z.string().trim().max(160).optional()
+}).refine((data) => {
+  return (!!data.linkedEntityType) === (!!data.linkedEntityId);
+}, {
+  message: "linkedEntityType and linkedEntityId must be provided together",
+  path: ["linkedEntityId"]
+}).refine((data) => {
+  if (data.status === "ACCEPTED" || data.status === "RESOLVED") {
+    return !!data.resolutionNotes && !!data.resolutionAction && !!data.linkedEntityType && !!data.linkedEntityId;
+  }
+  return true;
+}, {
+  message: "accepted or resolved corrections require notes, action, and linked entity",
+  path: ["resolutionNotes"]
+});

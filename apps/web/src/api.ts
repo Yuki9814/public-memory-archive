@@ -6,6 +6,7 @@ import type {
   Paginated,
   PlatformLinkDto,
   RevisionDto,
+  RevisionDiffDto,
   SourceDto,
   TimelineEntryDto,
   SessionDto,
@@ -59,6 +60,8 @@ type EventQuery = {
   tag?: string;
   eventProcessStatus?: EventProcessStatus | "";
   platform?: Platform | "";
+  dateFrom?: string;
+  dateTo?: string;
   sort?: "newest" | "oldest" | "updated" | "sourceCount";
 };
 
@@ -107,6 +110,11 @@ export type AdminSubmissionDto = {
   body: string;
   sourceUrl?: string | null;
   status: SubmissionStatus;
+  resolutionNotes?: string | null;
+  resolutionAction?: string | null;
+  linkedEntityType?: string | null;
+  linkedEntityId?: string | null;
+  resolvedAt?: string | null;
   createdAt: string;
   updatedAt: string;
   event?: { id: string; neutralTitle: string; slug: string } | null;
@@ -120,6 +128,11 @@ export type AdminCorrectionDto = {
   title: string;
   body: string;
   status: CorrectionStatus;
+  resolutionNotes?: string | null;
+  resolutionAction?: string | null;
+  linkedEntityType?: string | null;
+  linkedEntityId?: string | null;
+  resolvedAt?: string | null;
   createdAt: string;
   updatedAt: string;
   event?: { id: string; neutralTitle: string; slug: string } | null;
@@ -149,6 +162,19 @@ export type AdminTaskDto = {
     errorMessage?: string | null;
     capturedAt?: string | null;
   }>;
+};
+
+export type AdminAuditLogDto = {
+  id: string;
+  userId?: string | null;
+  entityType: string;
+  entityId: string;
+  action: string;
+  before?: unknown;
+  after?: unknown;
+  metadata?: unknown;
+  createdAt: string;
+  user?: { id: string; displayName: string; role: string } | null;
 };
 
 export type PublishPreflightFailure = {
@@ -214,6 +240,8 @@ export async function fetchEventPage(params: EventQuery = {}): Promise<Paginated
         tag: params.tag,
         eventProcessStatus: params.eventProcessStatus,
         platform: params.platform,
+        dateFrom: params.dateFrom,
+        dateTo: params.dateTo,
         sort: params.sort ?? "updated"
       })}`
     );
@@ -266,6 +294,8 @@ export async function fetchAdminEvents(params: EventQuery & { editorialStatus?: 
       editorialStatus: params.editorialStatus,
       eventProcessStatus: params.eventProcessStatus,
       platform: params.platform,
+      dateFrom: params.dateFrom,
+      dateTo: params.dateTo,
       sort: params.sort ?? "updated"
     })}`
   );
@@ -308,6 +338,71 @@ export async function updateAdminEvent(eventId: string, input: Partial<{
 
 export async function fetchAdminSources(eventId: string) {
   return getJson<{ items: AdminSourceDto[] }>(`/admin/events/${eventId}/sources`);
+}
+
+export async function fetchAdminTimeline(eventId: string) {
+  return getJson<{ items: TimelineEntryDto[] }>(`/admin/events/${eventId}/timeline`);
+}
+
+export async function createAdminTimeline(eventId: string, input: {
+  title: string;
+  body: string;
+  happenedAt: string;
+  sourceId?: string;
+  sortOrder?: number;
+}) {
+  return requestJson<TimelineEntryDto>(`/admin/events/${eventId}/timeline`, {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function fetchAdminClaims(eventId: string) {
+  return getJson<{ items: ClaimDto[] }>(`/admin/events/${eventId}/claims`);
+}
+
+export async function createAdminClaim(eventId: string, input: {
+  title: string;
+  statement: string;
+  status?: ClaimDto["status"];
+  importance?: ClaimDto["importance"];
+  sourceId?: string;
+}) {
+  return requestJson<ClaimDto>(`/admin/events/${eventId}/claims`, {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function fetchAdminEvidence(eventId: string) {
+  return getJson<{ items: ClaimDto["evidenceLinks"][number]["evidence"][] }>(`/admin/events/${eventId}/evidence`);
+}
+
+export async function createAdminEvidence(eventId: string, input: {
+  sourceId?: string;
+  title: string;
+  description: string;
+  evidenceKind?: string;
+  reliabilityLevel: ReliabilityLevel;
+  storageUrl?: string;
+  externalUrl?: string;
+  capturedAt?: string;
+}) {
+  return requestJson<ClaimDto["evidenceLinks"][number]["evidence"]>(`/admin/events/${eventId}/evidence`, {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
+export async function createAdminClaimEvidenceLink(claimId: string, input: {
+  evidenceId: string;
+  relationType: "SUPPORTS" | "OPPOSES" | "NEUTRAL" | "COMPLICATES";
+  notes?: string;
+}) {
+  return requestJson<ClaimDto["evidenceLinks"][number]>(`/admin/claims/${claimId}/evidence-links`, {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
 }
 
 export async function createAdminSource(eventId: string, input: {
@@ -360,6 +455,19 @@ export async function fetchAdminTask(taskId: string) {
   return getJson<AdminTaskDto>(`/admin/tasks/${encodeURIComponent(taskId)}`);
 }
 
+export async function fetchAdminEventTasks(eventId: string) {
+  return getJson<{ items: AdminTaskDto[] }>(`/admin/events/${eventId}/tasks`);
+}
+
+export async function fetchAdminAuditLogs(params: { entityType?: string; entityId?: string } = {}) {
+  return getJson<AdminAuditLogDto[]>(
+    `/admin/audit-logs${queryString({
+      entityType: params.entityType,
+      entityId: params.entityId
+    })}`
+  );
+}
+
 export async function fetchAdminReports() {
   return getJson<AdminReportDto[]>("/admin/reports");
 }
@@ -375,10 +483,16 @@ export async function fetchAdminSubmissions() {
   return getJson<AdminSubmissionDto[]>("/admin/submissions");
 }
 
-export async function resolveAdminSubmission(id: string, status: "REVIEWED" | "ACCEPTED" | "REJECTED") {
+export async function resolveAdminSubmission(id: string, input: {
+  status: "REVIEWED" | "ACCEPTED" | "REJECTED";
+  resolutionNotes?: string;
+  resolutionAction?: string;
+  linkedEntityType?: string;
+  linkedEntityId?: string;
+}) {
   return requestJson<AdminSubmissionDto>(`/admin/submissions/${id}/resolve`, {
     method: "POST",
-    body: JSON.stringify({ status })
+    body: JSON.stringify(input)
   });
 }
 
@@ -386,10 +500,16 @@ export async function fetchAdminCorrections() {
   return getJson<AdminCorrectionDto[]>("/admin/corrections");
 }
 
-export async function resolveAdminCorrection(id: string, status: "ACCEPTED" | "REJECTED" | "RESOLVED") {
+export async function resolveAdminCorrection(id: string, input: {
+  status: "ACCEPTED" | "REJECTED" | "RESOLVED";
+  resolutionNotes?: string;
+  resolutionAction?: string;
+  linkedEntityType?: string;
+  linkedEntityId?: string;
+}) {
   return requestJson<AdminCorrectionDto>(`/admin/corrections/${id}/resolve`, {
     method: "POST",
-    body: JSON.stringify({ status })
+    body: JSON.stringify(input)
   });
 }
 
@@ -494,6 +614,12 @@ export async function fetchVersions(slug: string): Promise<RevisionDto[]> {
   } catch (error) {
     return devFallback(mockVersions[slug] ?? [], error);
   }
+}
+
+export async function fetchRevisionDiff(slug: string, versionId: string): Promise<RevisionDiffDto> {
+  return getJson<RevisionDiffDto>(
+    `/api/events/${encodeURIComponent(slug)}/versions/${encodeURIComponent(versionId)}/diff`
+  );
 }
 
 export async function fetchSession(): Promise<SessionDto> {

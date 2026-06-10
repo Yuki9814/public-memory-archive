@@ -68,6 +68,14 @@ export interface EventDetailDto extends EventListItemDto {
   reportEnabled: boolean;
 }
 
+export interface ArchiveHealthDto {
+  strongEvidenceCount: number;
+  weakSourceCount: number;
+  unresolvedKeyClaimCount: number;
+  captureCoverage: number;
+  latestRevisionAt?: string | null;
+}
+
 export interface PlatformLinkDto {
   id: string;
   sourceId: string;
@@ -138,6 +146,12 @@ export interface SourceDto {
   authorDisplay?: string | null;
   publishedAt?: string | null;
   summary: string;
+  latestCaptureStatus?: string | null;
+  latestCaptureAt?: string | null;
+  latestCaptureError?: string | null;
+  latestCaptureHash?: string | null;
+  latestCaptureFinalUrl?: string | null;
+  latestCaptureArchiveUrl?: string | null;
 }
 
 export interface RevisionDto {
@@ -145,6 +159,18 @@ export interface RevisionDto {
   versionNumber: number;
   changeSummary: string;
   createdAt: string;
+}
+
+export interface RevisionDiffDto {
+  id: string;
+  versionNumber: number;
+  changeSummary: string;
+  createdAt: string;
+  changedFields: Array<{
+    path: string;
+    before: unknown;
+    after: unknown;
+  }>;
 }
 
 export interface FailedCheck {

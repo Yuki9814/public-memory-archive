@@ -8,7 +8,9 @@ import {
   createPlatformLinkSchema,
   createSourceSchema,
   createTimelineEntrySchema,
+  correctionResolveSchema,
   eventListQuerySchema,
+  submissionResolveSchema,
   updateEventSchema
 } from "@memory-archive/shared";
 import { prisma, type Prisma } from "@memory-archive/db";
@@ -16,7 +18,7 @@ import { getAdminSession } from "../lib/auth.js";
 import { runPublishPreflight } from "../lib/preflight.js";
 import { getIdParam, getTaskIdParam } from "../lib/route-params.js";
 import { enqueueCaptureTask } from "../lib/task-queue.js";
-import { serializeEventSummary, serializeSource } from "../lib/serializers.js";
+import { serializeClaim, serializeEventSummary, serializeSource, serializeTimelineEntry } from "../lib/serializers.js";
 
 function adminUserId(request: FastifyRequest) {
   const session = getAdminSession(request);
@@ -212,7 +214,13 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     if (!event) return reply.code(404).send({ error: "EVENT_NOT_FOUND" });
     const sources = await prisma.source.findMany({
       where: { eventId: id },
-      orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }]
+      orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+      include: {
+        captures: {
+          orderBy: [{ createdAt: "desc" }],
+          take: 1
+        }
+      }
     });
     return { items: sources.map(serializeSource) };
   });
@@ -312,6 +320,36 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     return task;
   });
 
+  app.get("/admin/events/:id/tasks", { schema: { tags: ["admin"] } }, async (request, reply) => {
+    const id = getIdParam(request);
+    const event = await prisma.event.findUnique({ where: { id }, select: { id: true } });
+    if (!event) return reply.code(404).send({ error: "EVENT_NOT_FOUND" });
+    const tasks = await prisma.task.findMany({
+      where: {
+        OR: [
+          { subjectType: "Event", subjectId: id },
+          { subjectType: "Source", subjectId: { in: (await prisma.source.findMany({ where: { eventId: id }, select: { id: true } })).map((source) => source.id) } }
+        ]
+      },
+      orderBy: { createdAt: "desc" },
+      include: { captures: true },
+      take: 50
+    });
+    return { items: tasks };
+  });
+
+  app.get("/admin/events/:id/timeline", { schema: { tags: ["admin"] } }, async (request, reply) => {
+    const id = getIdParam(request);
+    const event = await prisma.event.findUnique({ where: { id }, select: { id: true } });
+    if (!event) return reply.code(404).send({ error: "EVENT_NOT_FOUND" });
+    const entries = await prisma.timelineEntry.findMany({
+      where: { eventId: id },
+      orderBy: [{ happenedAt: "asc" }, { sortOrder: "asc" }],
+      include: { source: true }
+    });
+    return { items: entries.map(serializeTimelineEntry) };
+  });
+
   app.post("/admin/events/:id/timeline", { schema: { tags: ["admin"] } }, async (request, reply) => {
     const id = getIdParam(request);
     const body = createTimelineEntrySchema.parse(request.body);
@@ -324,6 +362,27 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     return reply.code(201).send(entry);
   });
 
+  app.get("/admin/events/:id/claims", { schema: { tags: ["admin"] } }, async (request, reply) => {
+    const id = getIdParam(request);
+    const event = await prisma.event.findUnique({ where: { id }, select: { id: true } });
+    if (!event) return reply.code(404).send({ error: "EVENT_NOT_FOUND" });
+    const claims = await prisma.claim.findMany({
+      where: { eventId: id },
+      orderBy: [{ importance: "asc" }, { createdAt: "asc" }],
+      include: {
+        claimantActor: true,
+        evidenceLinks: {
+          include: {
+            evidence: {
+              include: { source: true }
+            }
+          }
+        }
+      }
+    });
+    return { items: claims.map(serializeClaim) };
+  });
+
   app.post("/admin/events/:id/claims", { schema: { tags: ["admin"] } }, async (request, reply) => {
     const id = getIdParam(request);
     const body = createClaimSchema.parse(request.body);
@@ -334,6 +393,31 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       }
     });
     return reply.code(201).send(claim);
+  });
+
+  app.get("/admin/events/:id/evidence", { schema: { tags: ["admin"] } }, async (request, reply) => {
+    const id = getIdParam(request);
+    const event = await prisma.event.findUnique({ where: { id }, select: { id: true } });
+    if (!event) return reply.code(404).send({ error: "EVENT_NOT_FOUND" });
+    const evidence = await prisma.evidenceItem.findMany({
+      where: { eventId: id },
+      orderBy: [{ updatedAt: "desc" }, { createdAt: "desc" }],
+      include: { source: true }
+    });
+    return {
+      items: evidence.map((item) => ({
+        id: item.id,
+        title: item.title,
+        description: item.description,
+        evidenceKind: item.evidenceKind,
+        reliabilityLevel: item.reliabilityLevel,
+        sourceId: item.sourceId,
+        sourceTitle: item.source?.title ?? null,
+        storageUrl: item.storageUrl,
+        externalUrl: item.externalUrl,
+        capturedAt: item.capturedAt?.toISOString() ?? null
+      }))
+    };
   });
 
   app.post("/admin/events/:id/evidence", { schema: { tags: ["admin"] } }, async (request, reply) => {
@@ -461,6 +545,30 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     });
   });
 
+  app.get("/admin/audit-logs", { schema: { tags: ["admin"] } }, async (request) => {
+    const query = z.object({
+      entityType: z.string().trim().max(80).optional(),
+      entityId: z.string().trim().max(160).optional()
+    }).parse(request.query);
+    return prisma.auditLog.findMany({
+      where: {
+        ...(query.entityType ? { entityType: query.entityType } : {}),
+        ...(query.entityId ? { entityId: query.entityId } : {})
+      },
+      orderBy: { createdAt: "desc" },
+      take: 100,
+      include: {
+        user: {
+          select: {
+            id: true,
+            displayName: true,
+            role: true
+          }
+        }
+      }
+    });
+  });
+
   app.get("/admin/reports", { schema: { tags: ["admin"] } }, async () => {
     return prisma.report.findMany({
       orderBy: [{ status: "asc" }, { priority: "desc" }, { createdAt: "desc" }],
@@ -517,15 +625,18 @@ export async function registerAdminRoutes(app: FastifyInstance) {
 
   app.post("/admin/submissions/:id/resolve", { schema: { tags: ["admin"] } }, async (request, reply) => {
     const id = getIdParam(request);
-    const body = z
-      .object({
-        status: z.enum(["REVIEWED", "ACCEPTED", "REJECTED"])
-      })
-      .parse(request.body);
+    const body = submissionResolveSchema.parse(request.body);
 
     const submission = await prisma.submission.update({
       where: { id },
-      data: { status: body.status },
+      data: {
+        status: body.status,
+        resolutionNotes: body.resolutionNotes,
+        resolutionAction: body.resolutionAction,
+        linkedEntityType: body.linkedEntityType,
+        linkedEntityId: body.linkedEntityId,
+        resolvedAt: body.status === "ACCEPTED" || body.status === "REJECTED" ? new Date() : null
+      },
       include: {
         event: {
           select: {
@@ -573,11 +684,7 @@ export async function registerAdminRoutes(app: FastifyInstance) {
 
   app.post("/admin/corrections/:id/resolve", { schema: { tags: ["admin"] } }, async (request, reply) => {
     const id = getIdParam(request);
-    const body = z
-      .object({
-        status: z.enum(["ACCEPTED", "REJECTED", "RESOLVED"])
-      })
-      .parse(request.body);
+    const body = correctionResolveSchema.parse(request.body);
 
     const beforeCorrection = await prisma.correction.findUnique({
       where: { id },
@@ -591,7 +698,14 @@ export async function registerAdminRoutes(app: FastifyInstance) {
     const beforeEvent = eventId ? await loadEventSnapshot(eventId) : null;
     const correction = await prisma.correction.update({
       where: { id },
-      data: { status: body.status },
+      data: {
+        status: body.status,
+        resolutionNotes: body.resolutionNotes,
+        resolutionAction: body.resolutionAction,
+        linkedEntityType: body.linkedEntityType,
+        linkedEntityId: body.linkedEntityId,
+        resolvedAt: body.status === "ACCEPTED" || body.status === "REJECTED" || body.status === "RESOLVED" ? new Date() : null
+      },
       include: {
         event: {
           select: {
@@ -611,13 +725,15 @@ export async function registerAdminRoutes(app: FastifyInstance) {
 
     if (eventId && beforeEvent && (body.status === "ACCEPTED" || body.status === "RESOLVED")) {
       const afterEvent = await loadEventSnapshot(eventId);
-      await createEventVersion(
-        eventId,
-        beforeEvent,
-        afterEvent,
-        `处理纠错：${beforeCorrection.title}`,
-        adminUserId(request)
-      );
+      if (JSON.stringify(snapshot(beforeEvent)) !== JSON.stringify(snapshot(afterEvent))) {
+        await createEventVersion(
+          eventId,
+          beforeEvent,
+          afterEvent,
+          `处理纠错：${beforeCorrection.title}`,
+          adminUserId(request)
+        );
+      }
     }
 
     await prisma.auditLog.create({

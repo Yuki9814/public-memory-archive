@@ -51,6 +51,10 @@ export type TimelineEntryWithSource = TimelineEntry & {
   source?: Source | null;
 };
 
+type SourceWithCaptures = Source & {
+  captures?: ArchiveCapture[];
+};
+
 function iso(value: Date | string | null | undefined): string | null {
   if (!value) return null;
   const date = value instanceof Date ? value : new Date(value);
@@ -194,7 +198,8 @@ export function serializeTimelineEntry(entry: TimelineEntryWithSource): Timeline
   };
 }
 
-export function serializeSource(source: Source): SourceDto {
+export function serializeSource(source: SourceWithCaptures): SourceDto {
+  const latestCapture = source.captures?.[0];
   return {
     id: source.id,
     title: source.title,
@@ -204,7 +209,13 @@ export function serializeSource(source: Source): SourceDto {
     publisher: source.publisher,
     authorDisplay: source.authorDisplay,
     publishedAt: iso(source.publishedAt),
-    summary: source.summary
+    summary: source.summary,
+    latestCaptureStatus: latestCapture?.captureStatus ?? null,
+    latestCaptureAt: iso(latestCapture?.capturedAt ?? latestCapture?.updatedAt),
+    latestCaptureError: latestCapture?.errorMessage ?? null,
+    latestCaptureHash: latestCapture?.contentHash ?? null,
+    latestCaptureFinalUrl: latestCapture?.finalUrl ?? null,
+    latestCaptureArchiveUrl: latestCapture?.waybackUrl ?? latestCapture?.htmlSnapshotUrl ?? null
   };
 }
 

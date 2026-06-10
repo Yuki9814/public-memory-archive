@@ -2497,3 +2497,66 @@ select:focus-visible {
   padding: 2.2rem;
   box-shadow: var(--shadow-md);
 }
+
+.reliability-strip,
+.claim-actions,
+.source-actions,
+.card-actions.compact {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.55rem;
+  align-items: center;
+}
+
+.reliability-strip {
+  margin-top: 1rem;
+}
+
+.inline-feedback-btn {
+  border: 1px solid var(--border-color);
+  background: var(--bg-card);
+  color: var(--text-secondary);
+  border-radius: var(--radius-sm);
+  padding: 0.28rem 0.55rem;
+  font-size: 0.78rem;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.inline-feedback-btn:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+}
+
+.inline-feedback-btn.danger:hover {
+  color: var(--accent-crimson);
+  border-color: var(--accent-crimson);
+}
+
+.revision-diff {
+  display: grid;
+  gap: 0.6rem;
+  margin-top: 0.75rem;
+  padding: 0.75rem;
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-stamp);
+}
+
+.revision-diff-row {
+  display: grid;
+  gap: 0.25rem;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
+.admin-resolution-fields {
+  display: grid;
+  gap: 0.75rem;
+  width: 100%;
+}
+
+.admin-resolution-fields textarea {
+  min-height: 80px;
+}

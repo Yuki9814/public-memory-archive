@@ -15,7 +15,7 @@
     "dev:worker": "pnpm --filter @memory-archive/worker run dev",
     "dev:web": "pnpm --filter @memory-archive/web run dev",
     "build": "pnpm run db:generate && pnpm -r run build",
-    "test": "tsx --test packages/shared/src/*.test.ts apps/api/src/lib/*.test.ts",
+    "test": "tsx --test packages/shared/src/*.test.ts apps/api/src/lib/*.test.ts apps/worker/src/*.test.ts",
     "db:generate": "prisma generate --schema packages/db/prisma/schema.prisma",
     "db:migrate": "prisma migrate dev --schema packages/db/prisma/schema.prisma",
     "db:seed": "tsx packages/db/src/seed.ts",
