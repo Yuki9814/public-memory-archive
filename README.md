@@ -124,12 +124,8 @@ AI 辅助 API 只返回 `suggestions`，不写数据库：
 ## 验证
 
 ```bash
-pnpm --filter @memory-archive/shared run build
-pnpm --filter @memory-archive/db run build
-pnpm --filter @memory-archive/api run build
-pnpm --filter @memory-archive/worker run build
-pnpm exec tsc -p apps/web/tsconfig.json
-pnpm test
+pnpm install --frozen-lockfile
+pnpm verify
 ```
 
-当前 Codex 桌面 Node 环境下，Vite 的 Rollup 原生二进制可能被 macOS 签名策略拦截；前端 TypeScript 校验可通过，完整 Vite build 需要换成本机普通 Node 或修复 Rollup native module 签名。
+`lint` 与 `test` 会先生成所需的 Prisma Client，因此在全新克隆或清空构建产物后也可独立运行。GitHub Actions 在 Node.js 22 和锁定的 pnpm 版本下执行同一套 `verify` 门禁。
