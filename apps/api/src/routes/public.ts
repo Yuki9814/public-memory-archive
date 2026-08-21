@@ -170,11 +170,17 @@ export async function registerPublicRoutes(app: FastifyInstance) {
       reply.header("Content-Type", capture.artifactContentType ?? "application/octet-stream");
       reply.header("Content-Length", String(artifact.bytes));
       reply.header("Content-Disposition", "inline");
-      reply.header("Cache-Control", "public, max-age=60");
+      // Publication can be revoked for privacy or editorial reasons. Never let
+      // a browser or intermediary serve an artifact without re-checking the
+      // current PUBLISHED + SUCCEEDED database state.
+      reply.header("Cache-Control", "no-store");
+      reply.header("Pragma", "no-cache");
+      reply.header("Expires", "0");
       reply.header("ETag", `"${artifact.contentHash}"`);
+      reply.header("Cross-Origin-Resource-Policy", "same-origin");
       reply.header(
         "Content-Security-Policy",
-        "default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; script-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+        "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; script-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
       );
       return reply.send(Buffer.from(artifact.body));
     } catch (error) {

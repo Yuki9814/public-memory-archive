@@ -106,9 +106,11 @@ AI 辅助 API 只返回 `suggestions`，不写数据库：
 
 抓取到的 HTML 先经过 SSRF、响应大小和内容类型限制，再由 `ArchiveArtifactStore` 写入 `StorageAdapter`。默认 `LocalStorageAdapter` 使用内容寻址对象键 `sha256/<前两位>/<sha256>`，以临时文件加原子 rename 写入，并在读取时再次校验 hash。同一内容的重试复用同一个对象键，不把 worker 的绝对或相对文件路径写入公开 API。
 
-`GET /api/archive/captures/:id` 只服务属于 `PUBLISHED` 事件且状态为 `SUCCEEDED` 的存档物；未发布事件、后台资料、失败抓取和缺失对象统一返回 404。返回的 HTML 禁止脚本、对象和表单动作，避免把被抓取页面变成同源主动内容。旧版 `html_snapshot_url` 仅保留数据库兼容性，不再写入或作为公开 URL；需要重新抓取才能获得新对象路由。
+`GET /api/archive/captures/:id` 只服务属于 `PUBLISHED` 事件且状态为 `SUCCEEDED` 的存档物；未发布事件、后台资料、失败抓取和缺失对象统一返回 404。响应使用 `no-store`，每次读取都重新检查发布状态，因此撤回不会被浏览器或 CDN 的旧缓存绕过。返回的 HTML 运行在 CSP sandbox 中，并禁止脚本、对象和表单动作，避免把被抓取页面变成同源主动内容。旧版 `html_snapshot_url` 仅保留数据库兼容性，不再写入或作为公开 URL；需要重新抓取才能获得新对象路由。
 
 默认本地后端只适合单机或所有进程可访问的共享卷。生产环境 API 和 worker 必须配置同一个 `STORAGE_LOCAL_DIR`（建议绝对路径）；它不是多实例对象存储，也不提供跨主机复制或一致性保证。需要多实例部署时，应在保持 `StorageAdapter` 边界的前提下接入真正的共享对象存储适配器。
+
+GitHub CI 另用 PostgreSQL 16 运行 `pnpm test:migrations`：既验证全新数据库的完整迁移，也先建立旧版数据、保留 `html_snapshot_url`，再应用 v0.2 存档物列和索引，以证明升级不会破坏旧记录。
 
 ## 发布预检
 

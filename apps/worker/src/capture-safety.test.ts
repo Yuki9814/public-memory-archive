@@ -64,4 +64,17 @@ test("readLimitedText enforces content type and byte limits", async () => {
 
   const text = await readLimitedText(new Response("ok", { headers: { "content-type": "text/html" } }));
   assert.equal(text, "ok");
+
+  process.env.CAPTURE_MAX_BYTES = "1024";
+  const normalized = await import("./capture-safety.js").then(({ readLimitedTextArtifact }) =>
+    readLimitedTextArtifact(
+      new Response("plain", { headers: { "content-type": "text/plain; charset=iso-8859-1" } })
+    )
+  );
+  assert.equal(normalized.contentType, "text/plain; charset=utf-8");
+
+  await assert.rejects(
+    () => readLimitedText(new Response("bad", { headers: { "content-type": "application/not-text/html" } })),
+    /CAPTURE_CONTENT_TYPE_BLOCKED/
+  );
 });

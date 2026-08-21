@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, test } from "node:test";
@@ -47,7 +47,29 @@ test("object keys reject traversal and non-content-addressed paths", () => {
   assert.throws(() => assertSafeObjectKey("../secret"), /STORAGE_OBJECT_KEY_INVALID/);
   assert.throws(() => assertSafeObjectKey("sha256/aa/../../secret"), /STORAGE_OBJECT_KEY_INVALID/);
   assert.throws(() => assertSafeObjectKey("sha256\\aa\\aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), /STORAGE_OBJECT_KEY_INVALID/);
+  assert.throws(
+    () => assertSafeObjectKey(`sha256/bb/${"a".repeat(64)}`),
+    /STORAGE_OBJECT_KEY_INVALID/
+  );
   assert.equal(objectKeyForHash("a".repeat(64)), `sha256/aa/${"a".repeat(64)}`);
+});
+
+test("storage rejects a shard directory symlink that escapes its root", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "memory-archive-storage-"));
+  const outside = await mkdtemp(join(tmpdir(), "memory-archive-outside-"));
+  temporaryDirectories.push(directory, outside);
+  const body = Buffer.from("symlink escape attempt");
+  const hash = await import("node:crypto").then(({ createHash }) =>
+    createHash("sha256").update(body).digest("hex")
+  );
+  await mkdir(join(directory, "sha256"), { recursive: true });
+  await symlink(outside, join(directory, "sha256", hash.slice(0, 2)));
+  const adapter = new LocalStorageAdapter(directory);
+
+  await assert.rejects(
+    () => adapter.put({ body, contentType: "text/plain" }),
+    /STORAGE_OBJECT_PATH_ESCAPES_ROOT/
+  );
 });
 
 test("integrity mismatch is detected before an artifact is served", async () => {

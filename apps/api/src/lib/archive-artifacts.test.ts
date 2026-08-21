@@ -31,8 +31,9 @@ test("public archive route serves published artifacts and hides drafts", async (
   process.env.STORAGE_LOCAL_DIR = directory;
   const stored = await new ArchiveArtifactStore(new LocalStorageAdapter(directory)).putText("<html>published</html>");
   const originalFindUnique = prisma.archiveCapture.findUnique;
+  let publishedEditorialStatus = "PUBLISHED";
   prisma.archiveCapture.findUnique = (async ({ where }: { where: { id: string } }) => {
-    const editorialStatus = where.id === "published" ? "PUBLISHED" : where.id === "draft" ? "DRAFT" : null;
+    const editorialStatus = where.id === "published" ? publishedEditorialStatus : where.id === "draft" ? "DRAFT" : null;
     if (!editorialStatus) return null;
     return {
       id: where.id,
@@ -51,6 +52,13 @@ test("public archive route serves published artifacts and hides drafts", async (
     assert.equal(published.statusCode, 200);
     assert.equal(published.body, "<html>published</html>");
     assert.equal(published.headers["content-type"], "text/html; charset=utf-8");
+    assert.equal(published.headers["cache-control"], "no-store");
+    assert.match(published.headers["content-security-policy"] ?? "", /(^|; )sandbox(;|$)/);
+
+    publishedEditorialStatus = "UNPUBLISHED";
+    const withdrawn = await app.inject({ method: "GET", url: "/api/archive/captures/published" });
+    assert.equal(withdrawn.statusCode, 404);
+    assert.equal(withdrawn.json().error, "ARCHIVE_ARTIFACT_NOT_FOUND");
 
     const draft = await app.inject({ method: "GET", url: "/api/archive/captures/draft" });
     assert.equal(draft.statusCode, 404);

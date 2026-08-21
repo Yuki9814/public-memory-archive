@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, realpath, rename, stat, unlink, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -24,7 +24,7 @@ export type StoredArtifact = {
   contentType: string;
 };
 
-export type StoredArtifactWithBody = StoredArtifact & {
+export type StoredArtifactWithBody = Omit<StoredArtifact, "contentType"> & {
   body: Uint8Array;
 };
 
@@ -58,6 +58,10 @@ export function assertSafeObjectKey(objectKey: string) {
   if (normalized !== objectKey || !OBJECT_KEY_PATTERN.test(normalized)) {
     throw new Error("STORAGE_OBJECT_KEY_INVALID");
   }
+  const [, shard, contentHash] = normalized.split("/");
+  if (!contentHash || shard !== contentHash.slice(0, 2)) {
+    throw new Error("STORAGE_OBJECT_KEY_INVALID");
+  }
   return normalized;
 }
 
@@ -70,6 +74,28 @@ function resolveObjectPath(rootDir: string, objectKey: string) {
     throw new Error("STORAGE_OBJECT_KEY_INVALID");
   }
   return target;
+}
+
+async function assertResolvedParentWithinRoot(rootDir: string, targetPath: string) {
+  const [resolvedRoot, resolvedParent] = await Promise.all([
+    realpath(rootDir),
+    realpath(dirname(targetPath))
+  ]);
+  const relativeParent = relative(resolvedRoot, resolvedParent);
+  if (relativeParent.startsWith("..") || isAbsolute(relativeParent)) {
+    throw new Error("STORAGE_OBJECT_PATH_ESCAPES_ROOT");
+  }
+}
+
+async function assertTargetIsNotSymlink(targetPath: string) {
+  try {
+    if ((await lstat(targetPath)).isSymbolicLink()) {
+      throw new Error("STORAGE_OBJECT_SYMLINK_BLOCKED");
+    }
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
+    if (code !== "ENOENT") throw error;
+  }
 }
 
 export class LocalStorageAdapter implements StorageAdapter {
@@ -87,6 +113,8 @@ export class LocalStorageAdapter implements StorageAdapter {
     const contentType = normalizeContentType(input.contentType);
 
     await mkdir(dirname(targetPath), { recursive: true });
+    await assertResolvedParentWithinRoot(this.rootDir, targetPath);
+    await assertTargetIsNotSymlink(targetPath);
 
     try {
       const existing = await readFile(targetPath);
@@ -113,6 +141,8 @@ export class LocalStorageAdapter implements StorageAdapter {
     const targetPath = resolveObjectPath(this.rootDir, objectKey);
     let body: Buffer;
     try {
+      await assertResolvedParentWithinRoot(this.rootDir, targetPath);
+      await assertTargetIsNotSymlink(targetPath);
       body = await readFile(targetPath);
     } catch (error) {
       const code = error && typeof error === "object" && "code" in error ? error.code : undefined;
@@ -131,7 +161,6 @@ export class LocalStorageAdapter implements StorageAdapter {
       objectKey,
       contentHash,
       bytes: fileStats.size,
-      contentType: "application/octet-stream",
       body
     };
   }
