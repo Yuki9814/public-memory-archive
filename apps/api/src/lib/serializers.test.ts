@@ -131,6 +131,34 @@ test("serializeSource handles basic source", () => {
   assert.strictEqual(result.reliabilityLevel, "HIGH");
 });
 
+test("serializeSource exposes the controlled artifact route, never a worker path", () => {
+  const source = mockSource({
+    captures: [{
+      id: "cap_1",
+      captureStatus: "SUCCEEDED",
+      artifactKey: "sha256/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      htmlSnapshotUrl: "/worker/private/storage/cap_1.html",
+      waybackUrl: null
+    }]
+  });
+
+  assert.strictEqual(serializeSource(source).latestCaptureArchiveUrl, "/api/archive/captures/cap_1");
+});
+
+test("serializeSource does not expose artifacts from failed captures", () => {
+  const source = mockSource({
+    captures: [{
+      id: "cap_2",
+      captureStatus: "FAILED",
+      artifactKey: "sha256/bb/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      htmlSnapshotUrl: "/worker/private/storage/cap_2.html",
+      waybackUrl: null
+    }]
+  });
+
+  assert.strictEqual(serializeSource(source).latestCaptureArchiveUrl, null);
+});
+
 test("serializeTimelineEntry handles basic entry", () => {
   const entry = mockTimelineEntry({});
   const result = serializeTimelineEntry(entry);

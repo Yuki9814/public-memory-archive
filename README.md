@@ -15,10 +15,11 @@
 
 ```text
 apps/api        Fastify 公开 API 与 admin API
-apps/worker     BullMQ 异步任务：抓取、快照、hash、链接检测、Wayback 预留
+apps/worker     BullMQ 异步任务：抓取、存档物、hash、链接检测、Wayback 预留
 apps/web        Antigravity 前端主稿，包含公开页、详情页、提交/纠错/举报页和后台工作台
 packages/db     Prisma schema、migration、client、seed
 packages/shared 共享枚举、DTO、校验、RSS、预检文本工具
+packages/storage StorageAdapter 与 ArchiveArtifactStore；默认本地内容寻址存储
 ```
 
 ## 本地启动
@@ -52,6 +53,7 @@ pnpm run dev
 - `GET /api/events/:slug/claims`
 - `GET /api/events/:slug/sources`
 - `GET /api/events/:slug/platform-links`
+- `GET /api/archive/captures/:id`
 - `GET /api/events/:slug/versions`
 - `GET /api/events/:slug/versions/:versionId/diff`
 - `GET /api/feed.xml`
@@ -99,6 +101,14 @@ AI 辅助 API 只返回 `suggestions`，不写数据库：
 ## 访问权限
 
 所有访客默认都是 `GUEST`，不注册、不写入 `users` 表，可浏览公开档案、提交线索、纠错和举报。管理员通过 `ADMIN_PASSCODE` 登录，服务端签发 `pm_admin_session` HttpOnly Cookie；所有 `/admin/*` 与后台 AI 接口都会校验该 Cookie。种子数据只保留一个 `ADMIN` 用户，显示名为“馆长”。
+
+## 存档物生命周期（0.2.0）
+
+抓取到的 HTML 先经过 SSRF、响应大小和内容类型限制，再由 `ArchiveArtifactStore` 写入 `StorageAdapter`。默认 `LocalStorageAdapter` 使用内容寻址对象键 `sha256/<前两位>/<sha256>`，以临时文件加原子 rename 写入，并在读取时再次校验 hash。同一内容的重试复用同一个对象键，不把 worker 的绝对或相对文件路径写入公开 API。
+
+`GET /api/archive/captures/:id` 只服务属于 `PUBLISHED` 事件且状态为 `SUCCEEDED` 的存档物；未发布事件、后台资料、失败抓取和缺失对象统一返回 404。返回的 HTML 禁止脚本、对象和表单动作，避免把被抓取页面变成同源主动内容。旧版 `html_snapshot_url` 仅保留数据库兼容性，不再写入或作为公开 URL；需要重新抓取才能获得新对象路由。
+
+默认本地后端只适合单机或所有进程可访问的共享卷。生产环境 API 和 worker 必须配置同一个 `STORAGE_LOCAL_DIR`（建议绝对路径）；它不是多实例对象存储，也不提供跨主机复制或一致性保证。需要多实例部署时，应在保持 `StorageAdapter` 边界的前提下接入真正的共享对象存储适配器。
 
 ## 发布预检
 

@@ -156,7 +156,9 @@ export type AdminTaskDto = {
     originalUrl: string;
     finalUrl?: string | null;
     waybackUrl?: string | null;
-    htmlSnapshotUrl?: string | null;
+    artifactKey?: string | null;
+    artifactContentType?: string | null;
+    artifactBytes?: number | null;
     contentHash?: string | null;
     captureStatus: string;
     errorMessage?: string | null;

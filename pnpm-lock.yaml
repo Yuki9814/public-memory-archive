@@ -53,6 +53,9 @@ importers:
       '@memory-archive/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@memory-archive/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
       bullmq:
         specifier: ^5.56.0
         version: 5.77.1
@@ -112,6 +115,9 @@ importers:
       '@memory-archive/db':
         specifier: workspace:*
         version: link:../../packages/db
+      '@memory-archive/storage':
+        specifier: workspace:*
+        version: link:../../packages/storage
       bullmq:
         specifier: ^5.56.0
         version: 5.77.1
@@ -160,6 +166,18 @@ importers:
       vitest:
         specifier: ^3.1.4
         version: 3.2.4(@types/node@22.19.19)(jiti@2.7.0)(tsx@4.22.3)(yaml@2.9.0)
+
+  packages/storage:
+    devDependencies:
+      '@types/node':
+        specifier: ^22.15.21
+        version: 22.19.19
+      tsx:
+        specifier: ^4.19.4
+        version: 4.22.3
+      typescript:
+        specifier: ^5.8.3
+        version: 5.9.3
 
 packages:
 
@@ -1022,6 +1040,7 @@ packages:
   cron-parser@4.9.0:
     resolution: {integrity: sha512-p0SaNjrHOnQeR8/VnfGbmg9te2kfyYSQ7Sc/j/6DtPL3JQvKxmjO9TSjNFpujqV3vEYYBvNNvXSxzyksBWAx1Q==}
     engines: {node: '>=12.0.0'}
+    deprecated: v4 is no longer maintained, upgrade to v5
 
   csstype@3.2.3:
     resolution: {integrity: sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==}

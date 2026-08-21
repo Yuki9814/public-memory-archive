@@ -354,6 +354,9 @@ model ArchiveCapture {
   finalUrl        String?       @map("final_url")
   screenshotUrl   String?       @map("screenshot_url")
   htmlSnapshotUrl String?       @map("html_snapshot_url")
+  artifactKey     String?       @map("artifact_key")
+  artifactContentType String?   @map("artifact_content_type")
+  artifactBytes   Int?          @map("artifact_bytes")
   waybackUrl      String?       @map("wayback_url")
   contentHash     String?       @map("content_hash")
   captureStatus   CaptureStatus @default(QUEUED) @map("capture_status")
@@ -369,6 +372,7 @@ model ArchiveCapture {
   @@index([sourceId])
   @@index([taskId])
   @@index([captureStatus])
+  @@index([artifactKey])
   @@map("archive_captures")
 }
 

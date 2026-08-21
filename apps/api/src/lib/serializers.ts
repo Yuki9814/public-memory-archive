@@ -23,6 +23,7 @@ import type {
   ClaimEvidenceLink,
   Actor
 } from "@memory-archive/db";
+import { archiveArtifactPath } from "./archive-artifacts.js";
 
 export type EventWithInclusions = Event & {
   topic?: Topic | null;
@@ -200,6 +201,10 @@ export function serializeTimelineEntry(entry: TimelineEntryWithSource): Timeline
 
 export function serializeSource(source: SourceWithCaptures): SourceDto {
   const latestCapture = source.captures?.[0];
+  const latestCaptureArchiveUrl =
+    latestCapture?.captureStatus === "SUCCEEDED" && latestCapture.artifactKey
+      ? archiveArtifactPath(latestCapture.id)
+      : latestCapture?.waybackUrl ?? null;
   return {
     id: source.id,
     title: source.title,
@@ -215,7 +220,7 @@ export function serializeSource(source: SourceWithCaptures): SourceDto {
     latestCaptureError: latestCapture?.errorMessage ?? null,
     latestCaptureHash: latestCapture?.contentHash ?? null,
     latestCaptureFinalUrl: latestCapture?.finalUrl ?? null,
-    latestCaptureArchiveUrl: latestCapture?.waybackUrl ?? latestCapture?.htmlSnapshotUrl ?? null
+    latestCaptureArchiveUrl
   };
 }
 

@@ -36,7 +36,7 @@ export async function buildApp() {
     openapi: {
       info: {
         title: "Public Memory Archive API",
-        version: "0.1.0",
+        version: "0.2.0",
         description:
           "Public and admin APIs for a restrained public-event evidence archive."
       },

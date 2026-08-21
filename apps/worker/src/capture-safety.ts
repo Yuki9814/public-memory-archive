@@ -103,6 +103,10 @@ export async function safeFetch(url: string, init: RequestInit = {}, redirects =
 }
 
 export async function readLimitedText(response: Response) {
+  return (await readLimitedTextArtifact(response)).text;
+}
+
+export async function readLimitedTextArtifact(response: Response) {
   const contentLength = response.headers.get("content-length");
   const maxBytes = getCaptureMaxBytes();
   if (contentLength && Number(contentLength) > maxBytes) throw new Error("CAPTURE_RESPONSE_TOO_LARGE");
@@ -110,7 +114,16 @@ export async function readLimitedText(response: Response) {
   if (contentType && !/text\/html|text\/plain|application\/xhtml\+xml/i.test(contentType)) {
     throw new Error("CAPTURE_CONTENT_TYPE_BLOCKED");
   }
-  if (!response.body) return response.text();
+  if (!response.body) {
+    const text = await response.text();
+    const bytes = Buffer.byteLength(text, "utf8");
+    if (bytes > maxBytes) throw new Error("CAPTURE_RESPONSE_TOO_LARGE");
+    return {
+      text,
+      bytes,
+      contentType: contentType.trim() || "text/html; charset=utf-8"
+    };
+  }
 
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -126,5 +139,10 @@ export async function readLimitedText(response: Response) {
     }
     chunks.push(value);
   }
-  return new TextDecoder().decode(Buffer.concat(chunks));
+  const text = new TextDecoder().decode(Buffer.concat(chunks));
+  return {
+    text,
+    bytes: size,
+    contentType: contentType.trim() || "text/html; charset=utf-8"
+  };
 }

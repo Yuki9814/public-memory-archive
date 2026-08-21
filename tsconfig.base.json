@@ -14,7 +14,8 @@
     "baseUrl": ".",
     "paths": {
       "@memory-archive/shared": ["packages/shared/src/index.ts"],
-      "@memory-archive/db": ["packages/db/src/index.ts"]
+      "@memory-archive/db": ["packages/db/src/index.ts"],
+      "@memory-archive/storage": ["packages/storage/src/index.ts"]
     }
   }
 }
