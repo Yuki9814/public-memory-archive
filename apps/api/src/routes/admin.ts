@@ -13,7 +13,7 @@ import {
   submissionResolveSchema,
   updateEventSchema
 } from "@memory-archive/shared";
-import { prisma, type Prisma } from "@memory-archive/db";
+import { prisma, type ArchiveCapture, type Prisma } from "@memory-archive/db";
 import { getAdminSession } from "../lib/auth.js";
 import { runPublishPreflight } from "../lib/preflight.js";
 import { getIdParam, getTaskIdParam } from "../lib/route-params.js";
@@ -30,6 +30,11 @@ function adminUserId(request: FastifyRequest) {
 
 function snapshot(value: unknown) {
   return JSON.parse(JSON.stringify(value));
+}
+
+function serializeAdminCapture(capture: ArchiveCapture) {
+  const { htmlSnapshotUrl: _legacyHtmlSnapshotUrl, ...safeCapture } = capture;
+  return safeCapture;
 }
 
 async function loadEventSnapshot(eventId: string) {
@@ -317,7 +322,7 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       include: { captures: true }
     });
     if (!task) return reply.code(404).send({ error: "TASK_NOT_FOUND" });
-    return task;
+    return { ...task, captures: task.captures.map(serializeAdminCapture) };
   });
 
   app.get("/admin/events/:id/tasks", { schema: { tags: ["admin"] } }, async (request, reply) => {
@@ -335,7 +340,7 @@ export async function registerAdminRoutes(app: FastifyInstance) {
       include: { captures: true },
       take: 50
     });
-    return { items: tasks };
+    return { items: tasks.map((task) => ({ ...task, captures: task.captures.map(serializeAdminCapture) })) };
   });
 
   app.get("/admin/events/:id/timeline", { schema: { tags: ["admin"] } }, async (request, reply) => {

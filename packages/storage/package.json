@@ -1,5 +1,5 @@
 {
-  "name": "@memory-archive/shared",
+  "name": "@memory-archive/storage",
   "version": "0.2.0",
   "private": true,
   "type": "module",
@@ -10,12 +10,9 @@
     "dev": "tsc -w -p tsconfig.json",
     "test": "tsx --test src/*.test.ts"
   },
-  "dependencies": {
-    "zod": "^3.25.28"
-  },
   "devDependencies": {
+    "@types/node": "^22.15.21",
     "tsx": "^4.19.4",
-    "typescript": "^5.8.3",
-    "vitest": "^3.1.4"
+    "typescript": "^5.8.3"
   }
 }

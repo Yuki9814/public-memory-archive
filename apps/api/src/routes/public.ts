@@ -22,6 +22,7 @@ import { getPublicSiteUrl } from "../lib/public-url.js";
 import { getIdParam, getSlugParam } from "../lib/route-params.js";
 import { clientKey, consumeBucket, hasFilledHoneypot, rejectIfLimited } from "../lib/abuse.js";
 import { buildRevisionDiff } from "../lib/revision-diff.js";
+import { canServePublicArchiveCapture, getArchiveArtifactStore } from "../lib/archive-artifacts.js";
 
 const eventSummaryInclude = {
   topic: true,
@@ -122,6 +123,72 @@ async function assertPublishedFeedbackPlatformLink(platformLinkId: string) {
 }
 
 export async function registerPublicRoutes(app: FastifyInstance) {
+  app.get("/api/archive/captures/:id", { schema: { tags: ["public"] } }, async (request, reply) => {
+    const id = getIdParam(request);
+    const capture = await prisma.archiveCapture.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        artifactKey: true,
+        artifactContentType: true,
+        artifactBytes: true,
+        contentHash: true,
+        captureStatus: true,
+        source: {
+          select: {
+            event: {
+              select: { editorialStatus: true }
+            }
+          }
+        }
+      }
+    });
+
+    if (!capture) {
+      return reply.code(404).send({ error: "ARCHIVE_ARTIFACT_NOT_FOUND" });
+    }
+    const publicCapture = {
+      editorialStatus: capture.source.event.editorialStatus,
+      captureStatus: capture.captureStatus,
+      artifactKey: capture.artifactKey
+    };
+    if (!canServePublicArchiveCapture(publicCapture)) {
+      return reply.code(404).send({ error: "ARCHIVE_ARTIFACT_NOT_FOUND" });
+    }
+
+    try {
+      const artifact = await getArchiveArtifactStore().get(publicCapture.artifactKey);
+      if (!artifact) return reply.code(404).send({ error: "ARCHIVE_ARTIFACT_NOT_FOUND" });
+      if (
+        (capture.contentHash && capture.contentHash !== artifact.contentHash) ||
+        (capture.artifactBytes !== null && capture.artifactBytes !== artifact.bytes)
+      ) {
+        request.log.error({ captureId: capture.id }, "archive artifact metadata mismatch");
+        return reply.code(404).send({ error: "ARCHIVE_ARTIFACT_NOT_FOUND" });
+      }
+
+      reply.header("Content-Type", capture.artifactContentType ?? "application/octet-stream");
+      reply.header("Content-Length", String(artifact.bytes));
+      reply.header("Content-Disposition", "inline");
+      // Publication can be revoked for privacy or editorial reasons. Never let
+      // a browser or intermediary serve an artifact without re-checking the
+      // current PUBLISHED + SUCCEEDED database state.
+      reply.header("Cache-Control", "no-store");
+      reply.header("Pragma", "no-cache");
+      reply.header("Expires", "0");
+      reply.header("ETag", `"${artifact.contentHash}"`);
+      reply.header("Cross-Origin-Resource-Policy", "same-origin");
+      reply.header(
+        "Content-Security-Policy",
+        "sandbox; default-src 'none'; img-src data:; style-src 'unsafe-inline'; font-src data:; script-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+      );
+      return reply.send(Buffer.from(artifact.body));
+    } catch (error) {
+      request.log.error({ err: error, captureId: capture.id }, "archive artifact read failed");
+      return reply.code(404).send({ error: "ARCHIVE_ARTIFACT_NOT_FOUND" });
+    }
+  });
+
   app.get("/api/events/facets", { schema: { tags: ["public"] } }, async () => {
     const [topics, tags, events, platformLinks] = await Promise.all([
       prisma.topic.findMany({

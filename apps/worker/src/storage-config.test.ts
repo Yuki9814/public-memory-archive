@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { getStorageLocalDir } from "./storage-config.js";
+
+const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
+const defaultStorageLocalDir = resolve(repositoryRoot, "storage/captures");
 
 const originalEnv = process.env.STORAGE_LOCAL_DIR;
 
@@ -23,7 +28,7 @@ describe("getStorageLocalDir", () => {
         process.env.STORAGE_LOCAL_DIR = value;
       }
 
-      assert.equal(getStorageLocalDir(), "./storage/captures", `value=${JSON.stringify(value)}`);
+      assert.equal(getStorageLocalDir(), defaultStorageLocalDir, `value=${JSON.stringify(value)}`);
     }
   });
 
@@ -36,7 +41,8 @@ describe("getStorageLocalDir", () => {
     ] as const) {
       process.env.STORAGE_LOCAL_DIR = value;
 
-      assert.equal(getStorageLocalDir(), expected, `value=${JSON.stringify(value)}`);
+      const normalizedExpected = expected.startsWith("/") ? expected : resolve(repositoryRoot, expected);
+      assert.equal(getStorageLocalDir(), normalizedExpected, `value=${JSON.stringify(value)}`);
     }
   });
 });

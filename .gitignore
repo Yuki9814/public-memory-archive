@@ -10,6 +10,12 @@ coverage/
 *.tsbuildinfo
 packages/db/generated/
 storage/
+!packages/storage/
+!packages/storage/package.json
+!packages/storage/tsconfig.json
+!packages/storage/src/
+!packages/storage/src/**
+packages/storage/dist/
 tmp/
 logs/
 *.db

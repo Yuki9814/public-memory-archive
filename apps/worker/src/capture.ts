@@ -1,12 +1,10 @@
-import { createHash } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { prisma, type SourcePlatformLink } from "@memory-archive/db";
+import { ArchiveArtifactStore, LocalStorageAdapter } from "@memory-archive/storage";
 import { getStorageLocalDir } from "./storage-config.js";
 import { isConfiguredWaybackEnabled } from "./wayback-config.js";
-import { readLimitedText, safeFetch } from "./capture-safety.js";
+import { readLimitedTextArtifact, safeFetch } from "./capture-safety.js";
 
-type CaptureTarget = {
+export type CaptureTarget = {
   sourceId: string;
   platformLinkId?: string;
   url: string;
@@ -16,6 +14,9 @@ export type CaptureAttemptResult = {
   captureId: string;
   ok: boolean;
   hash?: string;
+  objectKey?: string;
+  bytes?: number;
+  contentType?: string;
   error?: string;
 };
 
@@ -41,17 +42,42 @@ function addDays(date: Date, days: number) {
   return next;
 }
 
-function sha256(value: string | Buffer) {
-  return createHash("sha256").update(value).digest("hex");
-}
+const artifactStore = new ArchiveArtifactStore(new LocalStorageAdapter(getStorageLocalDir()));
 
-async function saveHtmlSnapshot(captureId: string, html: string) {
-  const dir = getStorageLocalDir();
-  await mkdir(dir, { recursive: true });
-  const path = join(dir, `${captureId}.html`);
-  await writeFile(path, html, "utf8");
-  return path;
-}
+export type CapturePersistence = {
+  updateCapture(
+    captureId: string,
+    data: {
+      finalUrl: string;
+      artifactKey: string;
+      artifactContentType: string;
+      artifactBytes: number;
+      waybackUrl: string | null;
+      contentHash: string;
+      captureStatus: "SUCCEEDED" | "FAILED";
+      errorMessage: string | null;
+      capturedAt: Date;
+      nextRecaptureAt: Date;
+    }
+  ): Promise<void>;
+  updatePlatformLink(
+    platformLinkId: string,
+    data: {
+      capturedAt: Date;
+      availabilityStatus: "AVAILABLE" | "UNKNOWN";
+      archiveUrl?: string;
+    }
+  ): Promise<void>;
+};
+
+const databaseCapturePersistence: CapturePersistence = {
+  async updateCapture(captureId, data) {
+    await prisma.archiveCapture.update({ where: { id: captureId }, data });
+  },
+  async updatePlatformLink(platformLinkId, data) {
+    await prisma.sourcePlatformLink.update({ where: { id: platformLinkId }, data });
+  }
+};
 
 async function maybeSaveWayback(url: string) {
   if (!isConfiguredWaybackEnabled()) return null;
@@ -59,6 +85,58 @@ async function maybeSaveWayback(url: string) {
   const response = await safeFetch(endpoint, { method: "GET" });
   if (!response.ok) return null;
   return response.url;
+}
+
+export async function persistCaptureResponse(
+  target: CaptureTarget,
+  captureId: string,
+  response: Response,
+  options: {
+    store?: Pick<ArchiveArtifactStore, "putText" | "get">;
+    persistence?: CapturePersistence;
+    saveWayback?: (url: string) => Promise<string | null>;
+    now?: () => Date;
+  } = {}
+): Promise<CaptureAttemptResult> {
+  const store = options.store ?? artifactStore;
+  const persistence = options.persistence ?? databaseCapturePersistence;
+  const saveWayback = options.saveWayback ?? maybeSaveWayback;
+  const now = options.now ?? (() => new Date());
+
+  const captured = await readLimitedTextArtifact(response);
+  const artifact = await store.putText(captured.text, captured.contentType);
+  const waybackUrl = await saveWayback(target.url);
+  const capturedAt = now();
+
+  await persistence.updateCapture(captureId, {
+    finalUrl: response.url,
+    artifactKey: artifact.objectKey,
+    artifactContentType: artifact.contentType,
+    artifactBytes: artifact.bytes,
+    waybackUrl,
+    contentHash: artifact.contentHash,
+    captureStatus: response.ok ? "SUCCEEDED" : "FAILED",
+    errorMessage: response.ok ? null : `HTTP ${response.status}`,
+    capturedAt,
+    nextRecaptureAt: addDays(capturedAt, 14)
+  });
+
+  if (target.platformLinkId) {
+    await persistence.updatePlatformLink(target.platformLinkId, {
+      capturedAt,
+      availabilityStatus: response.ok ? "AVAILABLE" : "UNKNOWN",
+      archiveUrl: waybackUrl ?? undefined
+    });
+  }
+
+  return {
+    captureId,
+    ok: response.ok,
+    hash: artifact.contentHash,
+    objectKey: artifact.objectKey,
+    bytes: artifact.bytes,
+    contentType: artifact.contentType
+  };
 }
 
 async function captureOne(target: CaptureTarget, taskId: string) {
@@ -78,37 +156,7 @@ async function captureOne(target: CaptureTarget, taskId: string) {
         "user-agent": "PublicMemoryArchiveBot/0.1 (+https://example.org/archive-bot)"
       }
     });
-    const body = await readLimitedText(response);
-    const contentHash = sha256(body);
-    const htmlSnapshotUrl = await saveHtmlSnapshot(capture.id, body);
-    const waybackUrl = await maybeSaveWayback(target.url);
-
-    await prisma.archiveCapture.update({
-      where: { id: capture.id },
-      data: {
-        finalUrl: response.url,
-        htmlSnapshotUrl,
-        waybackUrl,
-        contentHash,
-        captureStatus: response.ok ? "SUCCEEDED" : "FAILED",
-        errorMessage: response.ok ? null : `HTTP ${response.status}`,
-        capturedAt: new Date(),
-        nextRecaptureAt: addDays(new Date(), 14)
-      }
-    });
-
-    if (target.platformLinkId) {
-      await prisma.sourcePlatformLink.update({
-        where: { id: target.platformLinkId },
-        data: {
-          capturedAt: new Date(),
-          availabilityStatus: response.ok ? "AVAILABLE" : "UNKNOWN",
-          archiveUrl: waybackUrl ?? undefined
-        }
-      });
-    }
-
-    return { captureId: capture.id, ok: response.ok, hash: contentHash };
+    return await persistCaptureResponse(target, capture.id, response);
   } catch (error) {
     await prisma.archiveCapture.update({
       where: { id: capture.id },
